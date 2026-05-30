@@ -6,7 +6,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./tor/torrc:/etc/tor/torrc:ro
-      - tor_keys:/var/lib/tor/hidden_service
+      - ./tor/hidden_service:/var/lib/tor/hidden_service
     networks:
       - darkseek
 
@@ -60,7 +60,6 @@ services:
 
 volumes:
   db_data:
-  tor_keys:
 
 networks:
   darkseek:
