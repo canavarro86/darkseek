@@ -4,5 +4,5 @@ DNSPort 5353
 ExitPolicy reject *:*
 Log notice stderr
 RunAsDaemon 0
-HiddenServiceDir /var/lib/tor/hidden_service/
+HiddenServiceDir /tmp/hidden_service/
 HiddenServicePort 80 nginx:80
