@@ -24,6 +24,21 @@ def health():
     return jsonify({"status": "ok"})
 
 
+@app.get("/stats")
+def stats():
+    from .models import get_db
+    with get_db() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM pages WHERE is_alive = 1").fetchone()[0]
+        by_category = conn.execute(
+            "SELECT category, COUNT(*) as cnt FROM pages WHERE is_alive = 1 GROUP BY category"
+        ).fetchall()
+    return jsonify({
+        "total_pages": total,
+        "by_category": {r["category"]: r["cnt"] for r in by_category},
+        "status": "ok"
+    })
+
+
 @app.get("/api/search")
 def search():
     query = request.args.get("q", "").strip()
