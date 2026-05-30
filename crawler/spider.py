@@ -11,7 +11,7 @@ load_dotenv()
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from crawler.ai_describe import describe_page
+from crawler.ai_describe import describe
 from crawler.models import mark_dead, should_recrawl, upsert_page
 from crawler.parser import parse_page
 
@@ -101,7 +101,7 @@ async def worker(
                     queue.task_done()
                     continue
 
-                ai = describe_page(parsed["title"], parsed["text"], parsed["category"])
+                ai = describe(html, url)
 
                 upsert_page(
                     url=url,
@@ -109,7 +109,7 @@ async def worker(
                     description=ai["description"],
                     category=ai["category"],
                     lang=ai["lang"],
-                    score=ai["score"],
+                    score=ai.get("score", 0.0),
                 )
                 logger.info("Saved: [%s] %s", ai["category"], parsed["title"][:80])
 

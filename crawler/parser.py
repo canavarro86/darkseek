@@ -77,3 +77,34 @@ def _guess_category(title: str, text: str) -> str:
     scores = {cat: sum(combined.count(kw) for kw in kws) for cat, kws in CATEGORY_KEYWORDS.items()}
     best = max(scores, key=scores.get)
     return best if scores[best] > 0 else "other"
+
+
+def parse_metadata(html: str, url: str) -> dict:
+    soup = BeautifulSoup(html, "lxml")
+
+    title = ""
+    tag = soup.find("title")
+    if tag and tag.get_text(strip=True):
+        title = tag.get_text(strip=True)[:60]
+    if not title:
+        h1 = soup.find("h1")
+        if h1:
+            title = h1.get_text(strip=True)[:60]
+    if not title:
+        title = url[:60]
+
+    description = ""
+    meta = soup.find("meta", attrs={"name": "description"})
+    if meta and meta.get("content"):
+        description = meta["content"].strip()[:160]
+    if not description:
+        p = soup.find("p")
+        if p:
+            description = p.get_text(strip=True)[:160]
+
+    html_tag = soup.find("html")
+    lang = "other"
+    if html_tag and html_tag.get("lang"):
+        lang = html_tag["lang"].strip()[:8] or "other"
+
+    return {"title": title, "description": description, "category": "other", "lang": lang}
