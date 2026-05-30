@@ -1,7 +1,9 @@
-from typing import List
+from typing import List, Optional
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
+
+MIN_TEXT_LENGTH = 100
 
 CATEGORY_KEYWORDS: dict[str, list[str]] = {
     "forum":   ["forum", "board", "thread", "post", "reply", "topic", "discussion"],
@@ -12,7 +14,8 @@ CATEGORY_KEYWORDS: dict[str, list[str]] = {
 }
 
 
-def parse_page(html: str, base_url: str) -> dict:
+def parse_page(html: str, base_url: str) -> Optional[dict]:
+    """Return parsed page dict, or None if page has too little content."""
     soup = BeautifulSoup(html, "lxml")
 
     for tag in soup(["script", "style", "noscript", "header", "footer", "nav"]):
@@ -20,6 +23,10 @@ def parse_page(html: str, base_url: str) -> dict:
 
     title = _extract_title(soup)
     text = _extract_text(soup)
+
+    if len(text) < MIN_TEXT_LENGTH:
+        return None
+
     links = _extract_links(soup, base_url)
     category = _guess_category(title, text)
 
@@ -42,7 +49,16 @@ def _extract_title(soup: BeautifulSoup) -> str:
 
 
 def _extract_text(soup: BeautifulSoup) -> str:
-    return " ".join(soup.get_text(separator=" ").split())
+    meta = soup.find("meta", attrs={"name": "description"})
+    meta_desc = meta["content"].strip() if meta and meta.get("content") else ""
+
+    parts = [meta_desc] if meta_desc else []
+    for tag in soup.find_all(["h1", "h2", "h3", "p"]):
+        t = tag.get_text(separator=" ", strip=True)
+        if t:
+            parts.append(t)
+
+    return " ".join(" ".join(parts).split())
 
 
 def _extract_links(soup: BeautifulSoup, base_url: str) -> List[str]:
@@ -52,7 +68,7 @@ def _extract_links(soup: BeautifulSoup, base_url: str) -> List[str]:
         url = urljoin(base_url, href)
         parsed = urlparse(url)
         if parsed.scheme in ("http", "https") and parsed.netloc.endswith(".onion"):
-            seen.add(url.split("#")[0])  # Drop fragments
+            seen.add(url.split("#")[0])
     return list(seen)
 
 

@@ -9,31 +9,39 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Add repo root to path so `api.models` is importable from the crawler container
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from api.models import mark_dead, upsert_page
 from crawler.ai_describe import describe_page
+from crawler.models import mark_dead, should_recrawl, upsert_page
 from crawler.parser import parse_page
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-TOR_PROXY = os.environ.get("TOR_PROXY", "socks5://tor:9050")
+TOR_PROXY = os.environ.get("TOR_PROXY", "socks5h://tor:9050")
 CRAWLER_DELAY = float(os.environ.get("CRAWLER_DELAY", "3"))
 CRAWLER_WORKERS = int(os.environ.get("CRAWLER_WORKERS", "2"))
-QUEUE_IDLE_TIMEOUT = 120  # Seconds to wait for new URLs before a worker exits
+QUEUE_IDLE_TIMEOUT = 120
 
 SEED_URLS = [
-    # The Hidden Wiki — main onion directory
-    "http://zqktlwiuavvvqqt4ybvgvi7tyo4hjl5xgfuvpdf6otjiycgwqbym2qad.onion/wiki/",
-    # Dark.fail — trusted onion link list
-    "http://darkfailenbsdla5mal2mxn2uz66od5vtzd5qozslagrfzachha3f3id.onion/",
+    "https://www.bbcnewsd73hkzno2ini43t4gblxvycyac5aw4gnv7t2rccijh7745uqd.onion/",
+    "https://www.nytimesn7cgmftshazwhfgzm37qxb44r64ytbb2dj3x62d2lljsciiyd.onion/",
+    "https://www.guardian2zotagl6tmjucg3lrhxdk4dw3lhbqnkvvkywawy3oqfoprid.onion/",
+    "http://bellcatmbguthn3age23lrbseln2lryzv3mt7whis7ktjw4qrestbzad.onion/",
+    "https://www.rferlo2zxgv23tct66v45s5mecftol5vod3hf4rqbipfp46fqu2q56ad.onion/",
+    "https://www.dwnewsgngmhlplxy6o2twtfgjnrnjxbegbwqx6wnotdhkzt562tszfid.onion/en/",
+    "https://www.voanews5aitmne6gs2btokcacixclgfl43cv27sirgbauyyjylwpdtqd.onion/",
+    "https://p53lf57qovyuvwsc6xnrppyply3vtqm7l6pcobkmyqsiofyeznfu5uqd.onion/",
+    "https://27m3p2uv7igmj6kvd4ql3cct5h3sdwrsajovkkndeufumzyfhlfev4qd.onion",
+    "http://ciadotgov4sjwlzihbbgxnqg3xiyrg7so2r2o3lt5wz5ypk4sxyjstad.onion/index.html",
+    "http://vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.onion/",
+    "http://7sk2kov2xwx6cbc32phynrifegg6pklmzs7luwcggtzrnlsolxxuyfyd.onion/en/index.html",
+    "https://www.bbcweb3hytmzhn5d532owbu6oqadra5z3ar726vq5kgwwn6aucdccrad.onion/learningenglish/",
 ]
 
 REQUEST_TIMEOUT = 30
-MAX_RETRIES = 2
-CYCLE_SLEEP = 3600  # Re-seed after all workers go idle
+MAX_RETRIES = 3
+CYCLE_SLEEP = 3600
 
 
 async def fetch(client: httpx.AsyncClient, url: str) -> str | None:
@@ -72,6 +80,11 @@ async def worker(
                 continue
             visited.add(url)
 
+            if not should_recrawl(url):
+                logger.debug("Skip fresh URL: %s", url)
+                queue.task_done()
+                continue
+
             async with semaphore:
                 logger.info("Crawling %s", url)
                 html = await fetch(client, url)
@@ -82,11 +95,17 @@ async def worker(
                     continue
 
                 parsed = parse_page(html, url)
+
+                if parsed is None:
+                    logger.debug("Skipping thin page: %s", url)
+                    queue.task_done()
+                    continue
+
                 ai = describe_page(parsed["title"], parsed["text"], parsed["category"])
 
                 upsert_page(
                     url=url,
-                    title=parsed["title"],
+                    title=ai.get("title") or parsed["title"],
                     description=ai["description"],
                     category=ai["category"],
                     lang=ai["lang"],
