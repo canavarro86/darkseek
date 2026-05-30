@@ -5,6 +5,9 @@ services:
   tor:
     image: dperson/torproxy:latest
     restart: unless-stopped
+    volumes:
+      - ./tor/torrc:/etc/tor/torrc:ro
+      - tor_data:/var/lib/tor
     networks:
       - darkseek
 
@@ -58,6 +61,7 @@ services:
 
 volumes:
   db_data:
+  tor_data:
 
 networks:
   darkseek:

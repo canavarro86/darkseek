@@ -1,0 +1,6 @@
+DataDirectory /var/lib/tor
+SocksPort 0.0.0.0:9050
+ControlPort 9051
+
+HiddenServiceDir /var/lib/tor/hidden_service/
+HiddenServicePort 80 nginx:80
