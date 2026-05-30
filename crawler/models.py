@@ -10,7 +10,16 @@ DATABASE_PATH = os.environ.get("DATABASE_PATH", "/app/db/darkseek.db")
 
 os.makedirs(os.path.dirname(DATABASE_PATH), exist_ok=True)
 
-RECRAWL_DAYS = 7
+RECRAWL_DAYS_DEFAULT = 7
+RECRAWL_DAYS_FORUM = 1
+FORUM_PATTERNS = ["forum", "board", "thread", "topic", "chan"]
+
+
+def _recrawl_days(url: str) -> int:
+    url_lower = url.lower()
+    if any(p in url_lower for p in FORUM_PATTERNS):
+        return RECRAWL_DAYS_FORUM
+    return RECRAWL_DAYS_DEFAULT
 
 
 @contextmanager
@@ -36,7 +45,7 @@ def should_recrawl(url: str) -> bool:
             last_seen = datetime.fromisoformat(row["last_seen"])
             if last_seen.tzinfo is None:
                 last_seen = last_seen.replace(tzinfo=timezone.utc)
-            return (datetime.now(timezone.utc) - last_seen).days >= RECRAWL_DAYS
+            return (datetime.now(timezone.utc) - last_seen).days >= _recrawl_days(url)
         except Exception:
             return True
 

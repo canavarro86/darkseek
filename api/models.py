@@ -66,3 +66,16 @@ def mark_dead(url: str) -> None:
     with get_db() as conn:
         conn.execute("UPDATE pages SET is_alive = 0 WHERE url = ?", (url,))
         conn.commit()
+
+
+def init_db():
+    schema_path = os.path.join(os.path.dirname(__file__), "..", "db", "schema.sql")
+    if not os.path.exists(schema_path):
+        return
+    with get_db() as conn:
+        with open(schema_path) as f:
+            conn.executescript(f.read())
+        conn.commit()
+
+
+init_db()

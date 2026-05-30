@@ -41,7 +41,9 @@ SEED_URLS = [
 
 REQUEST_TIMEOUT = 30
 MAX_RETRIES = 3
-CYCLE_SLEEP = 3600
+CYCLE_SLEEP = int(os.environ.get("CYCLE_SLEEP", "3600"))
+
+_visited: Set[str] = set()
 
 
 async def fetch(client: httpx.AsyncClient, url: str) -> str | None:
@@ -101,17 +103,17 @@ async def worker(
                     queue.task_done()
                     continue
 
-                ai = describe(html, url)
+                meta = describe(html, url)
 
                 upsert_page(
                     url=url,
-                    title=ai.get("title") or parsed["title"],
-                    description=ai["description"],
-                    category=ai["category"],
-                    lang=ai["lang"],
-                    score=ai.get("score", 0.0),
+                    title=meta.get("title") or parsed["title"],
+                    description=meta.get("description") or "",
+                    category=meta.get("category") or "other",
+                    lang=meta.get("lang") or "other",
+                    score=0.0,
                 )
-                logger.info("Saved: [%s] %s", ai["category"], parsed["title"][:80])
+                logger.info("Saved: [%s] %s", meta["category"], meta["title"][:80])
 
                 for link in parsed["links"]:
                     if link not in visited:
@@ -126,21 +128,22 @@ async def worker(
 
 async def crawl_cycle() -> None:
     queue: asyncio.Queue = asyncio.Queue()
-    visited: Set[str] = set()
     semaphore = asyncio.Semaphore(CRAWLER_WORKERS)
 
+    # Remove seeds from visited so should_recrawl re-evaluates them each cycle
     for url in SEED_URLS:
+        _visited.discard(url)
         await queue.put(url)
 
     transport = httpx.AsyncHTTPTransport(proxy=TOR_PROXY)
     async with httpx.AsyncClient(transport=transport) as client:
         tasks = [
-            asyncio.create_task(worker(queue, visited, semaphore, client))
+            asyncio.create_task(worker(queue, _visited, semaphore, client))
             for _ in range(CRAWLER_WORKERS)
         ]
         await asyncio.gather(*tasks)
 
-    logger.info("Crawl cycle done. Visited %d URLs.", len(visited))
+    logger.info("Crawl cycle done. Visited %d URLs.", len(_visited))
 
 
 async def run() -> None:
