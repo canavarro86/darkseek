@@ -1,12 +1,24 @@
 services:
 
+  tor-init:
+    image: dperson/torproxy:latest
+    user: root
+    entrypoint: ["sh", "-c", "mkdir -p /var/lib/tor/hidden_service && chown -R 101:101 /var/lib/tor/hidden_service && chmod 700 /var/lib/tor/hidden_service"]
+    volumes:
+      - tor_keys:/var/lib/tor/hidden_service
+    networks:
+      - darkseek
+
   tor:
     image: dperson/torproxy:latest
     user: "root"
     restart: unless-stopped
+    depends_on:
+      tor-init:
+        condition: service_completed_successfully
     volumes:
       - ./tor/torrc:/etc/tor/torrc:ro
-      - ./tor/hidden_service:/var/lib/tor/hidden_service
+      - tor_keys:/var/lib/tor/hidden_service
     networks:
       - darkseek
 
@@ -60,6 +72,7 @@ services:
 
 volumes:
   db_data:
+  tor_keys:
 
 networks:
   darkseek:
