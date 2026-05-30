@@ -2,6 +2,7 @@ services:
 
   tor:
     image: dperson/torproxy:latest
+    user: "root"
     restart: unless-stopped
     volumes:
       - ./tor/torrc:/etc/tor/torrc:ro
