@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DarkSeek</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0d0d0d;
+      --surface:  #141414;
+      --border:   #222;
+      --accent:   #00ff88;
+      --accent2:  #00cc6a;
+      --muted:    #555;
+      --text:     #e0e0e0;
+      --text-dim: #888;
+      --danger:   #ff4444;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Courier New', Courier, monospace;
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      padding: 2.5rem 1rem 1rem;
+      text-align: center;
+    }
+    .logo {
+      font-size: clamp(2rem, 6vw, 3.5rem);
+      font-weight: 900;
+      letter-spacing: 0.15em;
+      color: var(--accent);
+      text-shadow: 0 0 20px rgba(0,255,136,0.4);
+    }
+    .tagline {
+      color: var(--muted);
+      font-size: 0.8rem;
+      letter-spacing: 0.25em;
+      margin-top: 0.25rem;
+      text-transform: uppercase;
+    }
+
+    /* ── Search form ── */
+    .search-wrap {
+      display: flex;
+      gap: 0.5rem;
+      max-width: 720px;
+      margin: 2rem auto 1.25rem;
+      padding: 0 1rem;
+    }
+    #query {
+      flex: 1;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-family: inherit;
+      font-size: 1rem;
+      padding: 0.75rem 1rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    #query:focus { border-color: var(--accent); }
+    #query::placeholder { color: var(--muted); }
+
+    .btn {
+      background: var(--accent);
+      border: none;
+      color: #000;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.9rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      padding: 0.75rem 1.5rem;
+      transition: background 0.15s;
+    }
+    .btn:hover { background: var(--accent2); }
+    .btn:disabled { background: var(--muted); cursor: not-allowed; }
+
+    /* ── Category filters ── */
+    .filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      justify-content: center;
+      max-width: 720px;
+      margin: 0 auto 1.5rem;
+      padding: 0 1rem;
+    }
+    .filter-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      padding: 0.35rem 0.9rem;
+      text-transform: uppercase;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .filter-btn:hover, .filter-btn.active {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    /* ── Results area ── */
+    main {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 0 1rem 3rem;
+    }
+
+    .meta-bar {
+      color: var(--text-dim);
+      font-size: 0.78rem;
+      letter-spacing: 0.05em;
+      margin-bottom: 1.25rem;
+    }
+    .meta-bar span { color: var(--accent); }
+
+    /* Result card */
+    .result {
+      border: 1px solid var(--border);
+      margin-bottom: 1rem;
+      padding: 1rem 1.25rem;
+      transition: border-color 0.15s;
+    }
+    .result:hover { border-color: #333; }
+
+    .result-title a {
+      color: var(--accent);
+      font-size: 1rem;
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .result-title a:hover { text-decoration: underline; }
+
+    .result-url {
+      color: var(--muted);
+      font-size: 0.72rem;
+      margin: 0.2rem 0 0.5rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .result-desc {
+      color: var(--text);
+      font-size: 0.88rem;
+      line-height: 1.5;
+    }
+
+    .result-footer {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-top: 0.75rem;
+    }
+    .badge {
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      font-size: 0.65rem;
+      letter-spacing: 0.1em;
+      padding: 0.15rem 0.5rem;
+      text-transform: uppercase;
+    }
+    .badge.forum   { border-color: #4488ff; color: #4488ff; }
+    .badge.market  { border-color: #ff8844; color: #ff8844; }
+    .badge.news    { border-color: #ff44aa; color: #ff44aa; }
+    .badge.wiki    { border-color: #aa44ff; color: #aa44ff; }
+    .badge.service { border-color: #44ffee; color: #44ffee; }
+
+    .result-lang  { color: var(--muted); font-size: 0.72rem; }
+    .result-score {
+      color: var(--text-dim);
+      font-size: 0.72rem;
+      margin-left: auto;
+    }
+
+    /* ── States ── */
+    .state-msg {
+      color: var(--muted);
+      font-size: 0.9rem;
+      letter-spacing: 0.05em;
+      padding: 3rem 0;
+      text-align: center;
+    }
+    .state-msg.error { color: var(--danger); }
+
+    .spinner {
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      display: inline-block;
+      height: 1.5rem;
+      width: 1.5rem;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Pagination ── */
+    .pagination {
+      display: flex;
+      gap: 0.5rem;
+      justify-content: center;
+      margin-top: 2rem;
+    }
+    .page-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.85rem;
+      min-width: 2.5rem;
+      padding: 0.4rem 0.8rem;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .page-btn:hover:not(:disabled) {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .page-btn.active {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .page-btn:disabled { color: var(--muted); cursor: not-allowed; opacity: 0.4; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">DARKSEEK</div>
+  <div class="tagline">Onion Search Engine</div>
+</header>
+
+<div class="search-wrap">
+  <input id="query" type="text" placeholder="Search dark web..." autocomplete="off" spellcheck="false" />
+  <button class="btn" id="search-btn" onclick="doSearch()">Search</button>
+</div>
+
+<div class="filters" id="filters">
+  <button class="filter-btn active" data-cat="" onclick="setCategory(this, '')">All</button>
+  <button class="filter-btn" data-cat="forum"   onclick="setCategory(this, 'forum')">Forum</button>
+  <button class="filter-btn" data-cat="market"  onclick="setCategory(this, 'market')">Market</button>
+  <button class="filter-btn" data-cat="news"    onclick="setCategory(this, 'news')">News</button>
+  <button class="filter-btn" data-cat="wiki"    onclick="setCategory(this, 'wiki')">Wiki</button>
+  <button class="filter-btn" data-cat="service" onclick="setCategory(this, 'service')">Service</button>
+  <button class="filter-btn" data-cat="other"   onclick="setCategory(this, 'other')">Other</button>
+</div>
+
+<main id="results-area"></main>
+
+<script>
+  const PAGE_SIZE = 10;
+  let state = { query: '', page: 1, category: '', loading: false };
+
+  // Restore state from URL on load
+  window.addEventListener('DOMContentLoaded', () => {
+    const p = new URLSearchParams(location.search);
+    const q = p.get('q') || '';
+    const cat = p.get('category') || '';
+    const pg = parseInt(p.get('page')) || 1;
+    if (q) {
+      document.getElementById('query').value = q;
+      state.query = q;
+      state.page = pg;
+      state.category = cat;
+      syncCategoryUI(cat);
+      fetchResults();
+    }
+  });
+
+  document.getElementById('query').addEventListener('keydown', e => {
+    if (e.key === 'Enter') doSearch();
+  });
+
+  function doSearch() {
+    const q = document.getElementById('query').value.trim();
+    if (!q) return;
+    state.query = q;
+    state.page = 1;
+    pushUrl();
+    fetchResults();
+  }
+
+  function setCategory(btn, cat) {
+    state.category = cat;
+    state.page = 1;
+    syncCategoryUI(cat);
+    if (state.query) { pushUrl(); fetchResults(); }
+  }
+
+  function syncCategoryUI(cat) {
+    document.querySelectorAll('.filter-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.cat === cat);
+    });
+  }
+
+  function goPage(pg) {
+    state.page = pg;
+    pushUrl();
+    fetchResults();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function pushUrl() {
+    const p = new URLSearchParams({ q: state.query, page: state.page });
+    if (state.category) p.set('category', state.category);
+    history.pushState(null, '', '?' + p.toString());
+  }
+
+  async function fetchResults() {
+    if (state.loading) return;
+    state.loading = true;
+    document.getElementById('search-btn').disabled = true;
+    showLoading();
+
+    const p = new URLSearchParams({ q: state.query, page: state.page });
+    if (state.category) p.set('category', state.category);
+
+    try {
+      const res = await fetch('/api/search?' + p.toString());
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showError(err.error || `HTTP ${res.status}`);
+        return;
+      }
+      const data = await res.json();
+      render(data);
+    } catch (e) {
+      showError('Network error — is the API running?');
+    } finally {
+      state.loading = false;
+      document.getElementById('search-btn').disabled = false;
+    }
+  }
+
+  function showLoading() {
+    document.getElementById('results-area').innerHTML =
+      '<div class="state-msg"><span class="spinner"></span></div>';
+  }
+
+  function showError(msg) {
+    document.getElementById('results-area').innerHTML =
+      `<div class="state-msg error">Error: ${escHtml(msg)}</div>`;
+  }
+
+  function render(data) {
+    const area = document.getElementById('results-area');
+    if (!data.results || data.results.length === 0) {
+      area.innerHTML = '<div class="state-msg">No results found.</div>';
+      return;
+    }
+
+    const totalPages = Math.ceil(data.total / PAGE_SIZE);
+
+    const cards = data.results.map(r => `
+      <div class="result">
+        <div class="result-title">
+          <a href="${escAttr(r.url)}" target="_blank" rel="noopener noreferrer">
+            ${escHtml(r.title || r.url)}
+          </a>
+        </div>
+        <div class="result-url">${escHtml(r.url)}</div>
+        <div class="result-desc">${escHtml(r.description || '')}</div>
+        <div class="result-footer">
+          <span class="badge ${escAttr(r.category || 'other')}">${escHtml(r.category || 'other')}</span>
+          ${r.lang ? `<span class="result-lang">${escHtml(r.lang)}</span>` : ''}
+          <span class="result-score">score: ${(r.score || 0).toFixed(2)}</span>
+        </div>
+      </div>
+    `).join('');
+
+    const meta = `<div class="meta-bar">${data.total} result${data.total !== 1 ? 's' : ''} for <span>"${escHtml(data.query)}"</span> — page ${data.page} of ${totalPages}</div>`;
+
+    area.innerHTML = meta + cards + renderPagination(data.page, totalPages);
+  }
+
+  function renderPagination(current, total) {
+    if (total <= 1) return '';
+    const prev = `<button class="page-btn" ${current <= 1 ? 'disabled' : ''} onclick="goPage(${current - 1})">← Prev</button>`;
+    const next = `<button class="page-btn" ${current >= total ? 'disabled' : ''} onclick="goPage(${current + 1})">Next →</button>`;
+
+    // Show up to 5 page numbers around current
+    let pages = '';
+    const start = Math.max(1, current - 2);
+    const end   = Math.min(total, current + 2);
+    if (start > 1)   pages += `<button class="page-btn" onclick="goPage(1)">1</button>`;
+    if (start > 2)   pages += `<span style="color:var(--muted);padding:0 0.3rem">…</span>`;
+    for (let i = start; i <= end; i++) {
+      pages += `<button class="page-btn ${i === current ? 'active' : ''}" onclick="goPage(${i})">${i}</button>`;
+    }
+    if (end < total - 1) pages += `<span style="color:var(--muted);padding:0 0.3rem">…</span>`;
+    if (end < total)     pages += `<button class="page-btn" onclick="goPage(${total})">${total}</button>`;
+
+    return `<div class="pagination">${prev}${pages}${next}</div>`;
+  }
+
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function escAttr(s) { return escHtml(s); }
+</script>
+
+</body>
+</html>

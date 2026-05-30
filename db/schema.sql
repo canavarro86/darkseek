@@ -1,4 +1,3 @@
-@'
 CREATE TABLE IF NOT EXISTS pages (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   url          TEXT UNIQUE NOT NULL,
@@ -31,4 +30,3 @@ CREATE TRIGGER IF NOT EXISTS pages_au AFTER UPDATE ON pages BEGIN
   INSERT INTO pages_fts(pages_fts, rowid, title, description) VALUES('delete', old.id, old.title, old.description);
   INSERT INTO pages_fts(rowid, title, description) VALUES (new.id, new.title, new.description);
 END;
-'@ | Set-Content db\schema.sql -Encoding UTF8

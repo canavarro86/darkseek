@@ -1,0 +1,17 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.crawler.txt .
+RUN pip install --no-cache-dir -r requirements.crawler.txt
+
+COPY api/     ./api/
+COPY crawler/ ./crawler/
+COPY db/      ./db/
+
+RUN mkdir -p /app/db
+
+ENV PYTHONUNBUFFERED=1
+
+# Init DB schema then start the crawler
+CMD ["sh", "-c", "sqlite3 $DATABASE_PATH < /app/db/schema.sql && python -m crawler.spider"]
