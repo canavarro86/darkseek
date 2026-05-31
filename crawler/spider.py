@@ -1,3 +1,13 @@
+"""Async TOR crawler for .onion sites.
+
+Tuned config (env-overridable):
+  CRAWLER_WORKERS=5     parallel workers
+  CRAWLER_DELAY=1.5     seconds a worker waits after saving a page
+  QUEUE_IDLE_TIMEOUT=60 seconds a worker waits on an empty queue before exiting
+Plus a per-domain rate limit of 1 request / 10s so 5 workers don't hammer a
+single onion.
+"""
+
 import asyncio
 import hashlib
 import logging
@@ -6,6 +16,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Set, Tuple
+from urllib.parse import urlparse
 
 import httpx
 from dotenv import load_dotenv
@@ -29,9 +40,31 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 TOR_PROXY = os.environ.get("TOR_PROXY", "socks5h://tor:9050")
-CRAWLER_DELAY = float(os.environ.get("CRAWLER_DELAY", "3"))
-CRAWLER_WORKERS = int(os.environ.get("CRAWLER_WORKERS", "2"))
-QUEUE_IDLE_TIMEOUT = 120
+CRAWLER_DELAY = float(os.environ.get("CRAWLER_DELAY", "1.5"))
+CRAWLER_WORKERS = int(os.environ.get("CRAWLER_WORKERS", "5"))
+QUEUE_IDLE_TIMEOUT = 60
+
+# Per-domain rate limit: never hit the same .onion more than once per 10s, even
+# with multiple concurrent workers. Maps domain -> monotonic time of its next
+# allowed request.
+DOMAIN_RATE_LIMIT = 10.0
+_domain_last_seen: dict[str, float] = {}
+
+
+async def _domain_throttle(url: str) -> None:
+    """Sleep so the URL's domain is hit at most once per DOMAIN_RATE_LIMIT secs.
+
+    Reserves the slot before sleeping so concurrent workers targeting the same
+    domain serialize instead of all firing at once.
+    """
+    domain = urlparse(url).netloc
+    now = time.monotonic()
+    last = _domain_last_seen.get(domain, 0.0)
+    wait = DOMAIN_RATE_LIMIT - (now - last)
+    # Reserve the next slot for this domain immediately.
+    _domain_last_seen[domain] = max(now, last + DOMAIN_RATE_LIMIT)
+    if wait > 0:
+        await asyncio.sleep(wait)
 
 SEED_URLS = [
     "https://www.bbcnewsd73hkzno2ini43t4gblxvycyac5aw4gnv7t2rccijh7745uqd.onion/",
@@ -158,6 +191,7 @@ async def worker(
                 continue
 
             async with semaphore:
+                await _domain_throttle(url)
                 logger.info("Crawling %s", url)
                 html, outcome = await fetch(client, url)
 

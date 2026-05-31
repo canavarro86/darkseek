@@ -1,7 +1,7 @@
 services:
 
   tor:
-    image: dperson/torproxy:latest
+    image: osminogin/tor-simple
     user: "root"
     restart: unless-stopped
     mem_limit: 120m

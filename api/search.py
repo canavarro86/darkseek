@@ -1,8 +1,35 @@
+import re
 from typing import List, Optional, Tuple
+
+import Stemmer
 
 from .models import get_db
 
 PAGE_SIZE = 10
+
+# Snowball stemmers for the two languages we index meaningfully.
+_stemmers = {
+    "ru": Stemmer.Stemmer("russian"),
+    "en": Stemmer.Stemmer("english"),
+}
+
+_CYRILLIC_RE = re.compile(r"[а-яёА-ЯЁ]")
+
+
+def _stem_query(query: str) -> str:
+    """Stem query tokens: Russian for Cyrillic tokens, English otherwise.
+
+    Best-effort — any PyStemmer failure returns the original query unchanged so
+    search never breaks because of the stemmer.
+    """
+    try:
+        out = []
+        for token in query.split():
+            stemmer = _stemmers["ru"] if _CYRILLIC_RE.search(token) else _stemmers["en"]
+            out.append(stemmer.stemWord(token))
+        return " ".join(out)
+    except Exception:
+        return query
 
 
 def search_pages(
@@ -13,8 +40,15 @@ def search_pages(
 ) -> Tuple[List[dict], int]:
     offset = (page - 1) * page_size
 
+    # Stem non-trivial queries so "форумы" matches "форум" etc. Only applied to
+    # queries with non-ASCII chars or longer than 3 chars (short ASCII words gain
+    # nothing from stemming). Stem BEFORE escaping for FTS5.
+    stem_input = query
+    if any(ord(c) > 127 for c in query) or len(query.strip()) > 3:
+        stem_input = _stem_query(query)
+
     # Escape FTS5 special characters so raw user input doesn't break the query
-    safe_query = _escape_fts(query)
+    safe_query = _escape_fts(stem_input)
     # After escaping the query can be empty (e.g. input was only punctuation);
     # MATCH '' raises, so short-circuit to an empty result set.
     if not safe_query:
