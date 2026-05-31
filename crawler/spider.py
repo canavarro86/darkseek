@@ -42,6 +42,9 @@ logger = logging.getLogger(__name__)
 TOR_PROXY = os.environ.get("TOR_PROXY", "socks5h://tor:9050")
 CRAWLER_DELAY = float(os.environ.get("CRAWLER_DELAY", "1.5"))
 CRAWLER_WORKERS = int(os.environ.get("CRAWLER_WORKERS", "5"))
+# Seconds to pause between back-to-back crawl cycles. Set low (e.g. 30) for
+# continuous indexing; the default keeps the queue from being hammered empty.
+CYCLE_SLEEP = float(os.environ.get("CYCLE_SLEEP", "30"))
 QUEUE_IDLE_TIMEOUT = 60
 
 # Per-domain rate limit: never hit the same .onion more than once per 10s, even
@@ -307,15 +310,14 @@ async def crawl_cycle(weekly: bool = False) -> None:
 
 
 async def run() -> None:
-    # Bootstrap crawl on startup, then run on the 00:00 UTC schedule:
-    # every day a daily crawl, Sundays a weekly full crawl. Between runs the
-    # crawler sleeps and the API serves results straight from the DB.
+    # Continuous mode: crawl cycle after cycle with only CYCLE_SLEEP seconds of
+    # pause between them, so indexing runs as fast as the queue allows. Sundays
+    # still trigger a weekly full crawl.
     logger.info("Starting bootstrap crawl")
     await crawl_cycle(weekly=is_weekly_crawl())
     while True:
-        sleep_s = seconds_until_midnight_utc()
-        logger.info("Sleeping %.0fs until next scheduled crawl (00:00 UTC)", sleep_s)
-        await asyncio.sleep(sleep_s)
+        logger.info("Sleeping %.0fs until next crawl cycle", CYCLE_SLEEP)
+        await asyncio.sleep(CYCLE_SLEEP)
         weekly = is_weekly_crawl()
         logger.info("Starting %s crawl", "weekly" if weekly else "daily")
         await crawl_cycle(weekly=weekly)
