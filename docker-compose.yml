@@ -6,7 +6,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./tor/torrc:/etc/tor/torrc:ro
-      - tor_keys:/tmp/hidden_service
+      - /opt/onion_hidden_keys:/tmp/hidden_service
     networks:
       - darkseek
 
