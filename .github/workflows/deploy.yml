@@ -19,5 +19,26 @@ jobs:
             cd /opt/darkseek
             git pull origin main
             docker compose up -d --build --remove-orphans
-            sleep 10
-            curl -f http://localhost/health || exit 1
+            sleep 60
+
+            # Health check
+            curl -sf http://localhost/health | grep -q '"status":"ok"' || exit 1
+
+            # API responds
+            curl -sf "http://localhost/api/search?q=forum" | python3 -c "
+            import sys, json
+            d = json.load(sys.stdin)
+            assert d['total'] > 0, 'search returned 0 results'
+            urls = [r['url'] for r in d['results']]
+            assert len(urls) == len(set(urls)), 'duplicate URLs in results'
+            print('All checks passed')
+            " || exit 1
+
+            # Stats
+            curl -sf http://localhost/stats | python3 -c "
+            import sys, json
+            d = json.load(sys.stdin)
+            assert d['total_pages'] > 0, 'DB empty'
+            " || exit 1
+
+            echo "Deploy OK"

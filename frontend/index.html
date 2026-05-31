@@ -163,6 +163,13 @@
     #search-btn:hover    { background: rgba(0,255,65,0.25); }
     #search-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+    .nav-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1.25rem;
+      justify-content: center;
+      margin-bottom: 1.5rem;
+    }
     .submit-link {
       font-size: 10px;
       letter-spacing: 2px;
@@ -171,7 +178,6 @@
       text-transform: uppercase;
       border-bottom: 1px solid rgba(0,255,65,0.15);
       padding-bottom: 1px;
-      margin-bottom: 1.5rem;
       transition: color 0.15s, border-bottom-color 0.15s;
     }
     .submit-link:hover {
@@ -372,6 +378,36 @@
       z-index: 20;
       white-space: nowrap;
     }
+
+    /* ---- mobile ---- */
+    @media (max-width: 600px) {
+      .page          { padding: 0 0.75rem 7rem; }
+      .eyebrow       { font-size: 14px; letter-spacing: 2px; margin-top: 2.5rem; text-align: center; }
+      .logo          { font-size: 40px; letter-spacing: 3px; }
+      .subtitle      { font-size: 14px; letter-spacing: 2px; }
+      .search-wrap   { flex-direction: column; gap: 0.5rem; }
+      #query         { border-right: 1px solid rgba(0,255,65,0.30); font-size: 16px; min-height: 44px; width: 100%; }
+      #search-btn    { font-size: 14px; min-height: 44px; width: 100%; padding: 0.75rem 1rem; }
+      .nav-links     { gap: 1rem; }
+      .submit-link   { font-size: 14px; }
+      .stats         { font-size: 14px; text-align: center; line-height: 1.7; }
+      .filters       { gap: 0.5rem; }
+      .filter-btn    { font-size: 14px; min-height: 44px; padding: 0.5rem 0.9rem; }
+      .meta-bar      { font-size: 14px; }
+      .result-title a{ font-size: 16px; }
+      .result-url    { font-size: 14px; }
+      .result-desc   { font-size: 14px; }
+      .result-footer { flex-wrap: wrap; }
+      .result-dates  { font-size: 14px; flex-wrap: wrap; gap: 0.6rem; }
+      .badge         { font-size: 14px; }
+      .result-lang,
+      .result-score  { font-size: 14px; }
+      .page-btn      { font-size: 14px; min-height: 44px; min-width: 44px; }
+      .retry-btn     { font-size: 14px; min-height: 44px; }
+      .state-msg     { font-size: 14px; }
+      .quote         { font-size: 14px; }
+      .footer-onion  { font-size: 14px; }
+    }
   </style>
 </head>
 <body>
@@ -450,7 +486,10 @@
     <button type="submit" id="search-btn">Search</button>
   </form>
 
-  <a href="/submit" class="submit-link">+ add onion site to index</a>
+  <div class="nav-links">
+    <a href="/submit" class="submit-link">+ add onion site to index</a>
+    <a href="/donate" class="submit-link">♥ support darkseek</a>
+  </div>
 
   <div class="stats">
     indexed:&nbsp;<span class="hi" id="stat-count">—</span>&nbsp;pages&nbsp;·&nbsp;tor:&nbsp;online&nbsp;·&nbsp;latency:&nbsp;~<span class="hi" id="stat-latency">—</span>ms

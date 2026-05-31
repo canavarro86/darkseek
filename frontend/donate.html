@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DarkSeek — Submit Onion</title>
+  <title>DarkSeek — Support</title>
   <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -115,65 +115,123 @@
       letter-spacing: 3px;
       color: rgba(0,255,65,0.35);
       text-transform: uppercase;
+      margin-bottom: 2rem;
+    }
+
+    .support-head {
+      color: #00ff41;
+      font-size: 20px;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      text-shadow: 0 0 20px rgba(0,255,65,0.5);
+      margin-bottom: 1rem;
+    }
+
+    .support-blurb {
+      color: rgba(0,255,65,0.55);
+      font-size: 13px;
+      letter-spacing: 1px;
+      line-height: 1.7;
+      max-width: 540px;
+      text-align: center;
       margin-bottom: 2.5rem;
     }
+    .support-blurb .hi { color: rgba(0,255,65,0.85); }
 
-    .submit-form {
-      display: flex;
+    .coins {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1rem;
       width: 100%;
-      max-width: 520px;
+      max-width: 720px;
+    }
+
+    .coin {
+      border: 1px solid rgba(0,255,65,0.18);
+      background: rgba(0,255,65,0.02);
+      padding: 1.1rem 1.2rem;
+      display: flex;
+      flex-direction: column;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .coin:hover {
+      border-color: rgba(0,255,65,0.35);
+      background: rgba(0,255,65,0.04);
+    }
+
+    .coin-head {
+      display: flex;
+      align-items: baseline;
+      gap: 0.5rem;
       margin-bottom: 0.75rem;
     }
-    #submit-url {
-      flex: 1;
-      background: rgba(0,255,65,0.03);
-      border: 1px solid rgba(0,255,65,0.30);
-      border-right: none;
-      color: #c0ffd0;
-      font-family: inherit;
-      font-size: 0.95rem;
-      padding: 0.75rem 1rem;
-      outline: none;
-      box-shadow:
-        0 0 20px rgba(0,255,65,0.08),
-        inset 0 0 20px rgba(0,255,65,0.02);
-      transition: border-color 0.2s, box-shadow 0.2s;
+    .coin-symbol {
+      color: #00ff41;
+      font-size: 18px;
+      letter-spacing: 2px;
+      text-shadow: 0 0 12px rgba(0,255,65,0.5);
     }
-    #submit-url:focus {
-      border-color: rgba(0,255,65,0.60);
-      box-shadow:
-        0 0 30px rgba(0,255,65,0.15),
-        inset 0 0 20px rgba(0,255,65,0.04);
+    .coin-name {
+      color: rgba(0,255,65,0.55);
+      font-size: 12px;
+      letter-spacing: 1px;
     }
-    #submit-url::placeholder { color: rgba(0,255,65,0.25); }
+    .coin-ticker {
+      margin-left: auto;
+      color: rgba(0,255,65,0.35);
+      font-size: 11px;
+      letter-spacing: 1px;
+      border: 1px solid rgba(0,255,65,0.2);
+      padding: 0.1rem 0.45rem;
+      text-transform: uppercase;
+    }
 
-    #submit-btn {
-      background: rgba(0,255,65,0.12);
-      border: 1px solid rgba(0,255,65,0.30);
+    .coin-addr {
+      color: rgba(0,255,65,0.70);
+      font-size: 12px;
+      letter-spacing: 0.5px;
+      word-break: break-all;
+      background: rgba(0,255,65,0.04);
+      border: 1px solid rgba(0,255,65,0.12);
+      padding: 0.55rem 0.65rem;
+      line-height: 1.5;
+      margin-bottom: 0.7rem;
+    }
+
+    .coin-actions {
+      display: flex;
+      gap: 0.5rem;
+    }
+    .coin-btn {
+      flex: 1;
+      background: rgba(0,255,65,0.08);
+      border: 1px solid rgba(0,255,65,0.28);
       color: #00ff41;
       cursor: pointer;
       font-family: inherit;
       font-size: 11px;
-      letter-spacing: 2px;
-      padding: 0.75rem 1.4rem;
-      text-transform: uppercase;
-      transition: background 0.15s;
-      white-space: nowrap;
-    }
-    #submit-btn:hover    { background: rgba(0,255,65,0.25); }
-    #submit-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
-    .feedback {
-      font-size: 11px;
       letter-spacing: 1.5px;
-      min-height: 1.5rem;
-      margin: 0.5rem 0 1rem;
-      text-align: center;
-      color: rgba(0,255,65,0.35);
+      padding: 0.55rem 0.5rem;
+      text-transform: uppercase;
+      transition: background 0.15s, color 0.15s;
     }
-    .feedback.ok     { color: rgba(0,255,65,0.85); }
-    .feedback.err    { color: rgba(255,50,50,0.6); }
-    .feedback.exists { color: rgba(0,255,65,0.50); }
+    .coin-btn:hover { background: rgba(0,255,65,0.2); }
+    .coin-btn.copied {
+      background: rgba(0,255,65,0.3);
+      color: #e0ffe8;
+    }
+
+    .qr-wrap {
+      display: none;
+      justify-content: center;
+      margin-top: 0.9rem;
+      padding: 0.8rem;
+      background: #0a0a0a;
+      border: 1px solid rgba(0,255,65,0.18);
+    }
+    .qr-wrap.show { display: flex; }
+    .qr-wrap img,
+    .qr-wrap canvas { display: block; }
 
     .back-link {
       font-size: 10px;
@@ -183,7 +241,7 @@
       text-transform: uppercase;
       border-bottom: 1px solid rgba(0,255,65,0.15);
       padding-bottom: 1px;
-      margin-top: 0.5rem;
+      margin-top: 2.5rem;
       transition: color 0.15s, border-bottom-color 0.15s;
     }
     .back-link:hover {
@@ -217,17 +275,21 @@
 
     /* ---- mobile ---- */
     @media (max-width: 600px) {
-      .page         { padding: 0 0.75rem 7rem; }
-      .eyebrow      { font-size: 14px; letter-spacing: 2px; margin-top: 2.5rem; text-align: center; }
-      .logo         { font-size: 40px; letter-spacing: 3px; }
-      .subtitle     { font-size: 14px; letter-spacing: 2px; }
-      .submit-form  { flex-direction: column; gap: 0.5rem; }
-      #submit-url   { border-right: 1px solid rgba(0,255,65,0.30); font-size: 16px; min-height: 44px; width: 100%; }
-      #submit-btn   { font-size: 14px; min-height: 44px; width: 100%; padding: 0.75rem 1rem; }
-      .feedback     { font-size: 14px; }
-      .back-link    { font-size: 14px; }
-      .quote        { font-size: 14px; }
-      .footer-onion { font-size: 14px; }
+      .page          { padding: 0 0.75rem 7rem; }
+      .eyebrow       { font-size: 14px; letter-spacing: 2px; margin-top: 2.5rem; text-align: center; }
+      .logo          { font-size: 40px; letter-spacing: 3px; }
+      .subtitle      { font-size: 14px; letter-spacing: 2px; }
+      .support-head  { font-size: 18px; letter-spacing: 2px; text-align: center; }
+      .support-blurb { font-size: 14px; }
+      .coins         { grid-template-columns: 1fr; }
+      .coin-symbol   { font-size: 18px; }
+      .coin-name     { font-size: 14px; }
+      .coin-ticker   { font-size: 14px; }
+      .coin-addr     { font-size: 14px; }
+      .coin-btn      { font-size: 14px; min-height: 44px; }
+      .back-link     { font-size: 14px; }
+      .quote         { font-size: 14px; }
+      .footer-onion  { font-size: 14px; }
     }
   </style>
 </head>
@@ -296,18 +358,21 @@
 <div class="fog"></div>
 
 <div class="page">
-  <div class="eyebrow"><span class="dot"></span>submit to index</div>
+  <div class="eyebrow"><span class="dot"></span>support the project</div>
 
   <h1 class="logo"><span class="logo-dark">DARK</span><span class="logo-seek">SEEK</span></h1>
 
-  <p class="subtitle">add your onion service</p>
+  <p class="subtitle">keep the lights on</p>
 
-  <form class="submit-form" id="submit-form" onsubmit="submitSite(); return false;">
-    <input id="submit-url" type="text" placeholder="http://abc...xyz.onion/" autocomplete="off" spellcheck="false" />
-    <button type="submit" id="submit-btn">Submit</button>
-  </form>
+  <h2 class="support-head">Support DarkSeek</h2>
+  <p class="support-blurb">
+    DarkSeek is an <span class="hi">independent darknet search engine</span> — no ads,
+    no trackers, no logs. We run on donated server time and crypto. Every coin you
+    send keeps the crawler running and the index free for everyone. Pick a chain
+    below, copy the address or scan the QR code.
+  </p>
 
-  <div id="feedback" class="feedback"></div>
+  <div class="coins" id="coins"></div>
 
   <a href="/" class="back-link">← back to search</a>
 
@@ -316,48 +381,90 @@
 
 <footer class="footer-onion">37mj2uc7...onion</footer>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>
-  const ONION_RE = /^https?:\/\/[a-z2-7]{56}\.onion(\/.*)?$/;
+  const COINS = [
+    { symbol: '₿',  name: 'Bitcoin',  ticker: 'BTC',          addr: '1AakNM5jBAY7mds41WKs7tY2u1i5Zfkvow' },
+    { symbol: 'Ξ',  name: 'Ethereum', ticker: 'ETH (ERC20)',  addr: '0x69bcf463fc486666442102fc4e22d8603e4892e2' },
+    { symbol: '₮',  name: 'Tether',   ticker: 'USDT (TRC20)', addr: 'TZ27hcET4yWdQgeuQzRBDRsZi4f7HodzYp' },
+    { symbol: 'Ł',  name: 'Litecoin', ticker: 'LTC',          addr: 'LeiMrGa2rXRwToEwTygAZpwdvdcUbJgoEF' },
+    { symbol: 'Ð',  name: 'Dogecoin', ticker: 'DOGE',         addr: 'DF59DkzYtP9QgwESLjco682bbzoqnHboEp' },
+    { symbol: '◎',  name: 'Solana',   ticker: 'SOL',          addr: '4akJrZ34ctcgopwhwqXEkVsyi57ZcfUm2sL1JS8oRzXo' },
+  ];
 
-  function setFeedback(msg, cls) {
-    const el = document.getElementById('feedback');
-    el.textContent = msg;
-    el.className = 'feedback' + (cls ? ' ' + cls : '');
+  const QR_DARK  = '#00ff41';
+  const QR_LIGHT = '#0a0a0a';
+
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
-  async function submitSite() {
-    const input = document.getElementById('submit-url');
-    const url   = input.value.trim();
-    const btn   = document.getElementById('submit-btn');
+  const container = document.getElementById('coins');
 
-    if (!ONION_RE.test(url)) {
-      setFeedback('✗ Must be a valid v3 .onion URL (56-char host).', 'err');
-      return;
-    }
+  COINS.forEach((c, i) => {
+    const card = document.createElement('div');
+    card.className = 'coin';
+    card.innerHTML = `
+      <div class="coin-head">
+        <span class="coin-symbol">${escHtml(c.symbol)}</span>
+        <span class="coin-name">${escHtml(c.name)}</span>
+        <span class="coin-ticker">${escHtml(c.ticker)}</span>
+      </div>
+      <div class="coin-addr" id="addr-${i}">${escHtml(c.addr)}</div>
+      <div class="coin-actions">
+        <button class="coin-btn" data-act="copy" data-i="${i}">Copy</button>
+        <button class="coin-btn" data-act="qr"   data-i="${i}">Show QR</button>
+      </div>
+      <div class="qr-wrap" id="qr-${i}"></div>
+    `;
+    container.appendChild(card);
+  });
 
-    btn.disabled = true;
-    setFeedback('Submitting…', '');
+  container.addEventListener('click', e => {
+    const btn = e.target.closest('.coin-btn');
+    if (!btn) return;
+    const i = +btn.dataset.i;
+    if (btn.dataset.act === 'copy') copyAddr(i, btn);
+    else toggleQR(i, btn);
+  });
 
+  async function copyAddr(i, btn) {
+    const addr = COINS[i].addr;
     try {
-      const res  = await fetch('/api/submit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url }),
-      });
-      const data = await res.json().catch(() => ({}));
-
-      if (data.status === 'queued') {
-        input.value = '';
-        setFeedback('✓ URL added to crawl queue', 'ok');
-      } else if (data.status === 'exists') {
-        setFeedback('• ' + (data.message || 'Already indexed'), 'exists');
-      } else {
-        setFeedback('✗ ' + (data.message || `HTTP ${res.status}`), 'err');
-      }
+      await navigator.clipboard.writeText(addr);
     } catch (e) {
-      setFeedback('✗ Network error — is the API running?', 'err');
-    } finally {
-      btn.disabled = false;
+      // fallback for non-secure contexts
+      const ta = document.createElement('textarea');
+      ta.value = addr;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch (_) {}
+      document.body.removeChild(ta);
+    }
+    const orig = btn.textContent;
+    btn.textContent = 'Copied ✓';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1500);
+  }
+
+  function toggleQR(i, btn) {
+    const wrap = document.getElementById('qr-' + i);
+    const visible = wrap.classList.toggle('show');
+    btn.textContent = visible ? 'Hide QR' : 'Show QR';
+    if (visible && !wrap.dataset.rendered) {
+      new QRCode(wrap, {
+        text: COINS[i].addr,
+        width: 160,
+        height: 160,
+        colorDark: QR_DARK,
+        colorLight: QR_LIGHT,
+        correctLevel: QRCode.CorrectLevel.M,
+      });
+      wrap.dataset.rendered = '1';
     }
   }
 </script>
