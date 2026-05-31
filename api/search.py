@@ -40,15 +40,9 @@ def search_pages(
 ) -> Tuple[List[dict], int]:
     offset = (page - 1) * page_size
 
-    # Stem non-trivial queries so "форумы" matches "форум" etc. Only applied to
-    # queries with non-ASCII chars or longer than 3 chars (short ASCII words gain
-    # nothing from stemming). Stem BEFORE escaping for FTS5.
-    stem_input = query
-    if any(ord(c) > 127 for c in query) or len(query.strip()) > 3:
-        stem_input = _stem_query(query)
-
-    # Escape FTS5 special characters so raw user input doesn't break the query
-    safe_query = _escape_fts(stem_input)
+    # Build an FTS5 MATCH expression that searches both the stemmed and the
+    # original token, so thin Russian descriptions still match on exact tokens.
+    safe_query = _build_fts_query(query)
     # After escaping the query can be empty (e.g. input was only punctuation);
     # MATCH '' raises, so short-circuit to an empty result set.
     if not safe_query:
@@ -103,6 +97,32 @@ def search_pages(
             ).fetchone()[0]
 
     return [dict(r) for r in rows], total
+
+
+def _build_fts_query(query: str) -> str:
+    """Build an FTS5 MATCH expression matching both stemmed and exact tokens.
+
+    For each token, stem it; if the stem differs from the original, emit
+    '"stem" OR "original"' so a query like "форум" (stem "фор") still matches
+    pages that only store the exact token "форум". Tokens are joined by spaces
+    (FTS5 AND). Any failure falls back to plain _escape_fts() behaviour.
+    """
+    try:
+        token_exprs = []
+        for token in query.split():
+            if not token:
+                continue
+            stemmer = _stemmers["ru"] if _CYRILLIC_RE.search(token) else _stemmers["en"]
+            stemmed = stemmer.stemWord(token)
+            orig_safe = token.replace('"', '""')
+            if stemmed != token:
+                stem_safe = stemmed.replace('"', '""')
+                token_exprs.append(f'"{stem_safe}" OR "{orig_safe}"')
+            else:
+                token_exprs.append(f'"{orig_safe}"')
+        return " ".join(token_exprs)
+    except Exception:
+        return _escape_fts(query)
 
 
 def _escape_fts(query: str) -> str:

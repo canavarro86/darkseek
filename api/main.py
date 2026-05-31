@@ -162,6 +162,21 @@ def search():
     )
 
 
+if os.environ.get("DEBUG") == "1":
+
+    @app.get("/debug/fts-check")
+    def fts_check():
+        """One-time diagnostic: verify Russian text is actually stored/indexed.
+
+        Only registered when DEBUG=1. Returns a few Russian rows as JSON.
+        """
+        with get_db() as conn:
+            rows = conn.execute(
+                "SELECT title, description FROM pages WHERE lang LIKE 'ru%' LIMIT 3"
+            ).fetchall()
+        return jsonify({"rows": [dict(r) for r in rows]})
+
+
 @app.post("/api/submit")
 def submit():
     data = request.get_json(silent=True) or {}

@@ -52,6 +52,20 @@ def upsert_page(
     page_type: str = "other",
 ) -> None:
     with get_db() as conn:
+        # Skip pages whose content_hash already exists under a different URL, so
+        # the same content isn't indexed multiple times (e.g. mirror domains).
+        if content_hash:
+            dup = conn.execute(
+                "SELECT url FROM pages WHERE content_hash = ? AND url != ? LIMIT 1",
+                (content_hash, url),
+            ).fetchone()
+            if dup is not None:
+                logger.debug(
+                    "Skipping duplicate content_hash %s (already at %s)",
+                    content_hash,
+                    dup["url"],
+                )
+                return
         conn.execute(
             """
             INSERT INTO pages (url, title, description, category, lang, score, is_alive, last_seen, content_hash, page_type)
