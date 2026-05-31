@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir -r requirements.crawler.txt
 
 COPY api/     ./api/
 COPY crawler/ ./crawler/
-COPY db/      ./db/
+COPY db/schema.sql /app/schema.sql
 
 RUN mkdir -p /app/db
 
