@@ -458,11 +458,11 @@
     if (visible && !wrap.dataset.rendered) {
       new QRCode(wrap, {
         text: COINS[i].addr,
-        width: 160,
-        height: 160,
+        width: 300,
+        height: 300,
         colorDark: QR_DARK,
         colorLight: QR_LIGHT,
-        correctLevel: QRCode.CorrectLevel.M,
+        correctLevel: QRCode.CorrectLevel.L,
       });
       wrap.dataset.rendered = '1';
     }

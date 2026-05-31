@@ -17,8 +17,11 @@ jobs:
           port: 2020
           script: |
             cd /opt/darkseek
+            git stash
             git pull origin main
-            docker compose up -d --build --remove-orphans
+            docker compose down
+            docker compose build --no-cache
+            docker compose up -d --remove-orphans
             sleep 60
 
             # Health check
