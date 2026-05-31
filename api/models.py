@@ -2,12 +2,23 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterator, Optional
 
 DATABASE_PATH = os.environ.get("DATABASE_PATH", "/app/db/darkseek.db")
 
 # Ensure DB directory exists
 os.makedirs(os.path.dirname(DATABASE_PATH), exist_ok=True)
+
+# Per-connection PRAGMAs. WAL lets a writer (crawler) and readers (API) work
+# concurrently; cache_size is negative => KiB, so -32000 == 32 MiB; temp tables
+# and sort/group buffers live in RAM instead of touching the SSD.
+_PRAGMAS = (
+    "PRAGMA journal_mode=WAL",
+    "PRAGMA synchronous=NORMAL",
+    "PRAGMA cache_size=-32000",
+    "PRAGMA temp_store=MEMORY",
+    "PRAGMA busy_timeout=5000",
+)
 
 
 @dataclass
@@ -25,57 +36,121 @@ class Page:
 
 
 @contextmanager
-def get_db():
-    conn = sqlite3.connect(DATABASE_PATH)
+def get_db() -> Iterator[sqlite3.Connection]:
+    """Single source of truth for SQLite connections.
+
+    Applies the production PRAGMAs on every connection and always closes it,
+    even on error. Both the API and the crawler import this helper so the
+    pragma setup never drifts between the two processes.
+    """
+    conn = sqlite3.connect(DATABASE_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")  # Safe for concurrent reader + writer
     try:
+        for pragma in _PRAGMAS:
+            conn.execute(pragma)
         yield conn
     finally:
         conn.close()
 
 
-def upsert_page(
-    url: str,
-    title: str,
-    description: str,
-    category: str,
-    lang: str,
-    score: float = 0.0,
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r["name"] == column for r in rows)
+
+
+def migrate(conn: sqlite3.Connection) -> None:
+    """Idempotent, non-destructive schema migrations.
+
+    Only ADD COLUMN / CREATE IF NOT EXISTS — safe to run on every startup and
+    safe for zero-downtime deploys against an already-populated database.
+    """
+    # New columns on legacy databases that predate freshness ranking.
+    if not _column_exists(conn, "pages", "content_hash"):
+        conn.execute("ALTER TABLE pages ADD COLUMN content_hash TEXT")
+    if not _column_exists(conn, "pages", "page_type"):
+        conn.execute("ALTER TABLE pages ADD COLUMN page_type TEXT DEFAULT 'other'")
+
+    # Single-row table holding the latest crawler cycle metrics for /metrics.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS crawler_stats (
+            id               INTEGER PRIMARY KEY CHECK (id = 1),
+            last_run         TIMESTAMP,
+            pages_last_cycle INTEGER DEFAULT 0,
+            pages_per_hour   REAL DEFAULT 0.0,
+            cycle_seconds    REAL DEFAULT 0.0
+        )
+        """
+    )
+
+    # Indexes for the hot search/order-by paths. Idempotent.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_last_seen ON pages(last_seen DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_category ON pages(category)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_is_alive ON pages(is_alive)")
+    conn.commit()
+
+
+def init_db() -> None:
+    """Create the schema if missing, then apply migrations."""
+    schema_path = os.path.join(os.path.dirname(__file__), "..", "db", "schema.sql")
+    with get_db() as conn:
+        if os.path.exists(schema_path):
+            with open(schema_path) as f:
+                conn.executescript(f.read())
+        migrate(conn)
+        conn.commit()
+
+
+def record_crawl_stats(
+    pages_last_cycle: int,
+    pages_per_hour: float,
+    cycle_seconds: float,
 ) -> None:
+    """Persist the metrics from the most recent crawl cycle."""
     with get_db() as conn:
         conn.execute(
             """
-            INSERT INTO pages (url, title, description, category, lang, score, is_alive, last_seen)
-            VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
-            ON CONFLICT(url) DO UPDATE SET
-                title       = excluded.title,
-                description = excluded.description,
-                category    = excluded.category,
-                lang        = excluded.lang,
-                score       = excluded.score,
-                is_alive    = 1,
-                last_seen   = CURRENT_TIMESTAMP
+            INSERT INTO crawler_stats
+                (id, last_run, pages_last_cycle, pages_per_hour, cycle_seconds)
+            VALUES (1, CURRENT_TIMESTAMP, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                last_run         = CURRENT_TIMESTAMP,
+                pages_last_cycle = excluded.pages_last_cycle,
+                pages_per_hour   = excluded.pages_per_hour,
+                cycle_seconds    = excluded.cycle_seconds
             """,
-            (url, title, description, category, lang, score),
+            (pages_last_cycle, pages_per_hour, cycle_seconds),
         )
         conn.commit()
 
 
-def mark_dead(url: str) -> None:
+def get_crawl_stats() -> dict:
+    """Return the latest crawler metrics, or zeros if no cycle has run yet."""
     with get_db() as conn:
-        conn.execute("UPDATE pages SET is_alive = 0 WHERE url = ?", (url,))
-        conn.commit()
+        row = conn.execute(
+            "SELECT last_run, pages_last_cycle, pages_per_hour, cycle_seconds "
+            "FROM crawler_stats WHERE id = 1"
+        ).fetchone()
+    if row is None:
+        return {
+            "last_run": None,
+            "pages_last_cycle": 0,
+            "pages_per_hour": 0.0,
+            "cycle_seconds": 0.0,
+        }
+    return dict(row)
 
 
-def init_db():
-    schema_path = os.path.join(os.path.dirname(__file__), "..", "db", "schema.sql")
-    if not os.path.exists(schema_path):
-        return
-    with get_db() as conn:
-        with open(schema_path) as f:
-            conn.executescript(f.read())
-        conn.commit()
+def db_size_mb() -> float:
+    """Total on-disk size of the database, including WAL/SHM sidecars."""
+    total = 0
+    for suffix in ("", "-wal", "-shm"):
+        path = DATABASE_PATH + suffix
+        if os.path.exists(path):
+            total += os.path.getsize(path)
+    return round(total / (1024 * 1024), 2)
 
 
+# Run migrations at import so both the API and crawler converge on the same
+# schema regardless of which process starts first.
 init_db()

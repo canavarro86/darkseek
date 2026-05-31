@@ -1,3 +1,4 @@
+import re
 from typing import List, Optional
 from urllib.parse import urljoin, urlparse
 
@@ -15,7 +16,6 @@ CATEGORY_KEYWORDS: dict[str, list[str]] = {
 
 
 def parse_page(html: str, base_url: str) -> Optional[dict]:
-    """Return parsed page dict, or None if page has too little content."""
     soup = BeautifulSoup(html, "lxml")
 
     for tag in soup(["script", "style", "noscript", "header", "footer", "nav"]):
@@ -29,12 +29,14 @@ def parse_page(html: str, base_url: str) -> Optional[dict]:
 
     links = _extract_links(soup, base_url)
     category = _guess_category(title, text)
+    page_type = _detect_page_type(base_url)
 
     return {
         "title": title,
         "text": text[:5000],
         "links": links,
         "category": category,
+        "page_type": page_type,
     }
 
 
@@ -53,12 +55,20 @@ def _extract_text(soup: BeautifulSoup) -> str:
     meta_desc = meta["content"].strip() if meta and meta.get("content") else ""
 
     parts = [meta_desc] if meta_desc else []
-    for tag in soup.find_all(["h1", "h2", "h3", "p"]):
+    for tag in soup.find_all(["h1", "h2", "h3", "p", "li", "article"]):
         t = tag.get_text(separator=" ", strip=True)
         if t:
             parts.append(t)
+    for cls in ("post", "message", "content"):
+        for tag in soup.find_all("div", class_=cls):
+            t = tag.get_text(separator=" ", strip=True)
+            if t:
+                parts.append(t)
 
     return " ".join(" ".join(parts).split())
+
+
+_PAGINATION_RE = re.compile(r'[?&](page|start)=\d+|/page/\d+', re.IGNORECASE)
 
 
 def _extract_links(soup: BeautifulSoup, base_url: str) -> List[str]:
@@ -69,7 +79,21 @@ def _extract_links(soup: BeautifulSoup, base_url: str) -> List[str]:
         parsed = urlparse(url)
         if parsed.scheme in ("http", "https") and parsed.netloc.endswith(".onion"):
             seen.add(url.split("#")[0])
+        elif _PAGINATION_RE.search(href):
+            full = urljoin(base_url, href)
+            p = urlparse(full)
+            if p.scheme in ("http", "https") and p.netloc.endswith(".onion"):
+                seen.add(full.split("#")[0])
     return list(seen)
+
+
+def _detect_page_type(url: str) -> str:
+    path = urlparse(url).path.lower()
+    if re.search(r'/thread|/topic|/viewtopic|/showthread', path):
+        return "forum_thread"
+    if re.search(r'/forum|/board', path):
+        return "forum_index"
+    return "other"
 
 
 def _guess_category(title: str, text: str) -> str:

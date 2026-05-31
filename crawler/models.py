@@ -1,14 +1,11 @@
 import logging
-import os
-import sqlite3
-from contextlib import contextmanager
 from datetime import datetime, timezone
 
+# Single, unified DB layer (WAL + pragmas + migrations) lives in api.models.
+# The crawler image bundles api/, so this import works in both processes.
+from api.models import get_db
+
 logger = logging.getLogger(__name__)
-
-DATABASE_PATH = os.environ.get("DATABASE_PATH", "/app/db/darkseek.db")
-
-os.makedirs(os.path.dirname(DATABASE_PATH), exist_ok=True)
 
 RECRAWL_DAYS_DEFAULT = 7
 RECRAWL_DAYS_FORUM = 1
@@ -20,17 +17,6 @@ def _recrawl_days(url: str) -> int:
     if any(p in url_lower for p in FORUM_PATTERNS):
         return RECRAWL_DAYS_FORUM
     return RECRAWL_DAYS_DEFAULT
-
-
-@contextmanager
-def get_db():
-    conn = sqlite3.connect(DATABASE_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    try:
-        yield conn
-    finally:
-        conn.close()
 
 
 def should_recrawl(url: str) -> bool:
@@ -58,12 +44,13 @@ def upsert_page(
     lang: str,
     score: float = 0.0,
     content_hash: str | None = None,
+    page_type: str = "other",
 ) -> None:
     with get_db() as conn:
         conn.execute(
             """
-            INSERT INTO pages (url, title, description, category, lang, score, is_alive, last_seen, content_hash)
-            VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, ?)
+            INSERT INTO pages (url, title, description, category, lang, score, is_alive, last_seen, content_hash, page_type)
+            VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, ?, ?)
             ON CONFLICT(url) DO UPDATE SET
                 title        = excluded.title,
                 description  = excluded.description,
@@ -72,6 +59,7 @@ def upsert_page(
                 score        = excluded.score,
                 is_alive     = 1,
                 content_hash = excluded.content_hash,
+                page_type    = excluded.page_type,
                 last_seen    = CASE
                     WHEN excluded.content_hash IS NOT NULL
                          AND excluded.content_hash != COALESCE(pages.content_hash, '')
@@ -79,7 +67,7 @@ def upsert_page(
                     ELSE pages.last_seen
                     END
             """,
-            (url, title, description, category, lang, score, content_hash),
+            (url, title, description, category, lang, score, content_hash, page_type),
         )
         conn.commit()
 

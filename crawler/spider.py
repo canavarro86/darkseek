@@ -3,6 +3,7 @@ import hashlib
 import logging
 import os
 import sys
+import time
 from typing import Set
 
 import httpx
@@ -12,6 +13,7 @@ load_dotenv()
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from api.models import record_crawl_stats
 from crawler.ai_describe import describe
 from crawler.models import mark_dead, should_recrawl, upsert_page
 from crawler.parser import parse_page
@@ -40,17 +42,53 @@ SEED_URLS = [
     "https://www.bbcweb3hytmzhn5d532owbu6oqadra5z3ar726vq5kgwwn6aucdccrad.onion/learningenglish/",
 ]
 
-REQUEST_TIMEOUT = 30
 MAX_RETRIES = 3
 CYCLE_SLEEP = int(os.environ.get("CYCLE_SLEEP", "3600"))
 
+# Tor circuits are slow to build but reads should not hang forever. Split the
+# connect budget from the read budget so a dead peer fails fast while a slow
+# (but live) onion still gets time to respond.
+HTTP_TIMEOUT = httpx.Timeout(connect=15.0, read=30.0, write=15.0, pool=15.0)
+
+# Endpoint used to confirm the request actually egresses through Tor.
+TOR_CHECK_URL = "https://check.torproject.org/api/ip"
+TOR_VERIFY_RETRIES = 5
+TOR_VERIFY_BACKOFF = 5
+
 _visited: Set[str] = set()
+
+
+async def verify_tor(client: httpx.AsyncClient) -> bool:
+    """Confirm the proxy is up and traffic egresses through Tor.
+
+    Retries with linear backoff because the tor container may still be building
+    its first circuit when the crawler starts. Logs the exit IP so operators can
+    confirm the circuit in the logs. Returns False if Tor never becomes ready.
+    """
+    for attempt in range(1, TOR_VERIFY_RETRIES + 1):
+        try:
+            r = await client.get(TOR_CHECK_URL, timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+            data = r.json()
+            logger.info(
+                "Tor circuit ready: exit IP %s (IsTor=%s)",
+                data.get("IP"),
+                data.get("IsTor"),
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                "Tor not ready (attempt %d/%d): %s", attempt, TOR_VERIFY_RETRIES, e
+            )
+            await asyncio.sleep(TOR_VERIFY_BACKOFF * attempt)
+    logger.error("Tor proxy unavailable after %d attempts", TOR_VERIFY_RETRIES)
+    return False
 
 
 async def fetch(client: httpx.AsyncClient, url: str) -> str | None:
     for attempt in range(MAX_RETRIES):
         try:
-            r = await client.get(url, timeout=REQUEST_TIMEOUT, follow_redirects=True)
+            r = await client.get(url, timeout=HTTP_TIMEOUT, follow_redirects=True)
             r.raise_for_status()
             return r.text
         except httpx.HTTPStatusError as e:
@@ -69,6 +107,7 @@ async def worker(
     visited: Set[str],
     semaphore: asyncio.Semaphore,
     client: httpx.AsyncClient,
+    stats: dict,
 ) -> None:
     while True:
         try:
@@ -111,7 +150,9 @@ async def worker(
                     lang=meta.get("lang") or "other",
                     score=0.0,
                     content_hash=content_hash,
+                    page_type=parsed.get("page_type", "other"),
                 )
+                stats["saved"] += 1
                 logger.info("Saved: [%s] %s", meta["category"], meta["title"][:80])
 
                 for link in parsed["links"]:
@@ -128,6 +169,8 @@ async def worker(
 async def crawl_cycle() -> None:
     queue: asyncio.Queue = asyncio.Queue()
     semaphore = asyncio.Semaphore(CRAWLER_WORKERS)
+    stats = {"saved": 0}
+    started = time.monotonic()
 
     # Remove seeds from visited so should_recrawl re-evaluates them each cycle
     for url in SEED_URLS:
@@ -136,13 +179,30 @@ async def crawl_cycle() -> None:
 
     transport = httpx.AsyncHTTPTransport(proxy=TOR_PROXY)
     async with httpx.AsyncClient(transport=transport) as client:
+        # Don't burn a cycle hammering dead onions if Tor isn't routing yet.
+        if not await verify_tor(client):
+            logger.error("Skipping crawl cycle: Tor proxy not ready")
+            return
+
         tasks = [
-            asyncio.create_task(worker(queue, _visited, semaphore, client))
+            asyncio.create_task(worker(queue, _visited, semaphore, client, stats))
             for _ in range(CRAWLER_WORKERS)
         ]
         await asyncio.gather(*tasks)
 
-    logger.info("Crawl cycle done. Visited %d URLs.", len(_visited))
+    elapsed = max(time.monotonic() - started, 0.001)
+    pages_per_hour = stats["saved"] / elapsed * 3600
+    logger.info(
+        "Crawl cycle done. Visited %d URLs, saved %d pages in %.0fs (%.1f pages/hour).",
+        len(_visited),
+        stats["saved"],
+        elapsed,
+        pages_per_hour,
+    )
+    try:
+        record_crawl_stats(stats["saved"], pages_per_hour, elapsed)
+    except Exception:
+        logger.exception("Failed to record crawl stats")
 
 
 async def run() -> None:

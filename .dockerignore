@@ -1,0 +1,21 @@
+.git
+.github
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+.env.*
+# Exclude the database files but keep db/schema.sql for image builds.
+db/*.db
+db/*.db-wal
+db/*.db-shm
+*.db
+*.db-wal
+*.db-shm
+tor/hidden_service
+/opt/onion_hidden_keys
+.claude
+*.md
+LICENSE
+Makefile
