@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime, timezone
+from typing import List
 
 # Single, unified DB layer (WAL + pragmas + migrations) lives in api.models.
 # The crawler image bundles api/, so this import works in both processes.
@@ -10,6 +11,10 @@ logger = logging.getLogger(__name__)
 RECRAWL_DAYS_DEFAULT = 7
 RECRAWL_DAYS_FORUM = 1
 FORUM_PATTERNS = ["forum", "board", "thread", "topic", "chan"]
+
+# A site is only marked dead after this many consecutive fetch failures, so a
+# transient outage doesn't immediately drop it from the index.
+MAX_FAIL_COUNT = 3
 
 
 def _recrawl_days(url: str) -> int:
@@ -58,6 +63,7 @@ def upsert_page(
                 lang         = excluded.lang,
                 score        = excluded.score,
                 is_alive     = 1,
+                fail_count   = 0,
                 content_hash = excluded.content_hash,
                 page_type    = excluded.page_type,
                 last_seen    = CASE
@@ -73,6 +79,66 @@ def upsert_page(
 
 
 def mark_dead(url: str) -> None:
+    """Record a fetch failure. Only flips is_alive=0 after MAX_FAIL_COUNT
+    consecutive failures so a single transient error doesn't drop the site."""
     with get_db() as conn:
-        conn.execute("UPDATE pages SET is_alive = 0 WHERE url = ?", (url,))
+        conn.execute(
+            """
+            UPDATE pages
+            SET fail_count = fail_count + 1,
+                is_alive   = CASE WHEN fail_count + 1 >= ? THEN 0 ELSE is_alive END
+            WHERE url = ?
+            """,
+            (MAX_FAIL_COUNT, url),
+        )
         conn.commit()
+
+
+def mark_alive(url: str) -> None:
+    """Reset failure state after a successful crawl."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE pages SET is_alive = 1, fail_count = 0 WHERE url = ?", (url,)
+        )
+        conn.commit()
+
+
+def revive_check() -> List[str]:
+    """Give long-dead sites another chance.
+
+    Finds sites marked dead whose last successful sighting is older than 7 days,
+    resets them to alive with a clean fail counter, and returns their URLs so the
+    crawler can re-queue them.
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT url FROM pages "
+            "WHERE is_alive = 0 AND last_seen < datetime('now', '-7 days')"
+        ).fetchall()
+        urls = [r["url"] for r in rows]
+        if urls:
+            conn.executemany(
+                "UPDATE pages SET is_alive = 1, fail_count = 0 WHERE url = ?",
+                [(u,) for u in urls],
+            )
+            conn.commit()
+    if urls:
+        logger.info("Revived %d dead sites for re-crawl", len(urls))
+    return urls
+
+
+def get_crawl_urls(include_dead: bool = False) -> List[str]:
+    """URLs to feed into a scheduled crawl.
+
+    Daily crawl (include_dead=False): live sites not seen in the last 23 hours.
+    Weekly full crawl (include_dead=True): every known URL, dead ones included.
+    """
+    with get_db() as conn:
+        if include_dead:
+            rows = conn.execute("SELECT url FROM pages").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT url FROM pages "
+                "WHERE is_alive = 1 AND last_seen < datetime('now', '-23 hours')"
+            ).fetchall()
+    return [r["url"] for r in rows]

@@ -83,6 +83,56 @@
     .btn:hover { background: var(--accent2); }
     .btn:disabled { background: var(--muted); cursor: not-allowed; }
 
+    /* Ghost (outline) button — same font, smaller padding, not filled */
+    .btn-ghost {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.8rem;
+      letter-spacing: 0.05em;
+      padding: 0.75rem 0.9rem;
+      white-space: nowrap;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ── Submit-site form (collapsible) ── */
+    .submit-wrap {
+      display: none;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      max-width: 720px;
+      margin: -0.5rem auto 1.25rem;
+      padding: 0 1rem;
+    }
+    .submit-wrap.open { display: flex; }
+    #submit-url {
+      flex: 1;
+      min-width: 240px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-family: inherit;
+      font-size: 0.9rem;
+      padding: 0.6rem 0.9rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    #submit-url:focus { border-color: var(--accent); }
+    #submit-url::placeholder { color: var(--muted); }
+    .submit-status {
+      flex-basis: 100%;
+      font-size: 0.78rem;
+      letter-spacing: 0.03em;
+      min-height: 1rem;
+      padding-left: 0.2rem;
+    }
+    .submit-status.ok     { color: var(--accent); }
+    .submit-status.err    { color: var(--danger); }
+    .submit-status.exists { color: #e0c044; }
+
     /* ── Category filters ── */
     .filters {
       display: flex;
@@ -278,6 +328,13 @@
 <div class="search-wrap">
   <input id="query" type="text" placeholder="Search dark web..." autocomplete="off" spellcheck="false" />
   <button class="btn" id="search-btn" onclick="doSearch()">Search</button>
+  <button class="btn-ghost" id="submit-toggle" onclick="toggleSubmit()">＋ Submit site</button>
+</div>
+
+<div class="submit-wrap" id="submit-wrap">
+  <input id="submit-url" type="text" placeholder="http://abc...xyz.onion/" autocomplete="off" spellcheck="false" />
+  <button class="btn" id="submit-btn" onclick="submitSite()">Submit</button>
+  <div class="submit-status" id="submit-status"></div>
 </div>
 
 <div class="filters" id="filters">
@@ -329,8 +386,15 @@
   }, 300);
   queryEl.addEventListener('input', debouncedSearch);
 
-  // Keyboard shortcuts: "/" focuses search, Escape clears it.
+  document.getElementById('submit-url').addEventListener('keydown', e => {
+    if (e.key === 'Enter') submitSite();
+  });
+
+  // Keyboard shortcuts: "/" focuses search, Escape clears it. Ignore while the
+  // submit-site field is focused so it doesn't hijack typing there.
+  const submitUrlEl = document.getElementById('submit-url');
   document.addEventListener('keydown', e => {
+    if (document.activeElement === submitUrlEl) return;
     if (e.key === '/' && document.activeElement !== queryEl) {
       e.preventDefault();
       queryEl.focus();
@@ -489,6 +553,59 @@
     if (end < total)     pages += `<button class="page-btn" onclick="goPage(${total})">${total}</button>`;
 
     return `<div class="pagination">${prev}${pages}${next}</div>`;
+  }
+
+  // ── Submit site ──
+  const ONION_RE = /^https?:\/\/[a-z2-7]{56}\.onion(\/.*)?$/;
+
+  function toggleSubmit() {
+    const wrap = document.getElementById('submit-wrap');
+    wrap.classList.toggle('open');
+    if (wrap.classList.contains('open')) {
+      document.getElementById('submit-url').focus();
+    }
+  }
+
+  function setSubmitStatus(msg, cls) {
+    const el = document.getElementById('submit-status');
+    el.textContent = msg;
+    el.className = 'submit-status' + (cls ? ' ' + cls : '');
+  }
+
+  async function submitSite() {
+    const input = document.getElementById('submit-url');
+    const url = input.value.trim();
+
+    if (!ONION_RE.test(url)) {
+      setSubmitStatus('✗ Must be a valid v3 .onion URL (56 chars).', 'err');
+      return;
+    }
+
+    const btn = document.getElementById('submit-btn');
+    btn.disabled = true;
+    setSubmitStatus('Submitting…', '');
+
+    try {
+      const res = await fetch('/api/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (data.status === 'queued') {
+        input.value = '';
+        setSubmitStatus('✓ Queued for indexing. Check back in ~1 hour.', 'ok');
+      } else if (data.status === 'exists') {
+        setSubmitStatus('• ' + (data.message || 'Already indexed'), 'exists');
+      } else {
+        setSubmitStatus('✗ ' + (data.message || `HTTP ${res.status}`), 'err');
+      }
+    } catch (e) {
+      setSubmitStatus('✗ Network error — is the API running?', 'err');
+    } finally {
+      btn.disabled = false;
+    }
   }
 
   function relativeDate(iso) {
