@@ -2,6 +2,8 @@ import logging
 import os
 import re
 import time
+import urllib.parse
+import urllib.request
 import uuid
 
 from dotenv import load_dotenv
@@ -210,6 +212,61 @@ def submit():
         "status": "queued",
         "message": "Site queued for indexing. Check back in ~1 hour.",
     })
+
+
+@app.get("/api/ip")
+def api_ip():
+    """Return the caller's Tor exit-node IP for the `ip` instant command.
+
+    Behind nginx the real client address arrives via X-Forwarded-For, which
+    _client_ip() reads. Per-request and uncacheable, so disable caching.
+    """
+    resp = jsonify({"ip": _client_ip(), "note": "tor exit node"})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+# Process-lifetime cache of url -> shortened url, to avoid duplicate TinyURL
+# calls for the same input. Bounded so a hostile caller can't grow it forever.
+_shorten_cache: dict[str, str] = {}
+_SHORTEN_CACHE_MAX = 1000
+SHORTEN_TIMEOUT = 5  # seconds
+
+
+@app.get("/api/shorten")
+def api_shorten():
+    """Shorten a URL via TinyURL for the `shorten` instant command.
+
+    Params: url (http/https only, validated before any outbound call).
+    Returns: {"short": "<url>"} on success, {"error": ...} otherwise.
+    """
+    url = (request.args.get("url") or "").strip()
+
+    # Validate before proxying: scheme + host required, sane length, no junk.
+    if not url or len(url) > 2048:
+        return jsonify({"error": "invalid url"}), 400
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return jsonify({"error": "invalid url"}), 400
+
+    if url in _shorten_cache:
+        return jsonify({"short": _shorten_cache[url], "cached": True})
+
+    api = "https://tinyurl.com/api-create.php?url=" + urllib.parse.quote(url, safe="")
+    try:
+        with urllib.request.urlopen(api, timeout=SHORTEN_TIMEOUT) as r:
+            short = r.read().decode("utf-8", "replace").strip()
+    except Exception:
+        logger.exception("shorten failed for url=%r", url)
+        return jsonify({"error": "shorten service unavailable"}), 502
+
+    if not short.startswith("http"):
+        return jsonify({"error": "shorten failed"}), 502
+
+    if len(_shorten_cache) < _SHORTEN_CACHE_MAX:
+        _shorten_cache[url] = short
+    logger.info("shorten url=%r -> %s", url, short)
+    return jsonify({"short": short})
 
 
 def run() -> None:
