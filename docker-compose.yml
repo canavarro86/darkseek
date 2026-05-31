@@ -45,7 +45,11 @@ services:
       context: .
       dockerfile: Dockerfile.crawler
     env_file: .env
-    mem_limit: 256m
+    environment:
+      - CRAWLER_WORKERS=5
+      - CRAWLER_DELAY=1.5
+      - CYCLE_SLEEP=30
+    mem_limit: 300m
     volumes:
       - /opt/darkseek_db:/app/db
     depends_on:
@@ -55,8 +59,8 @@ services:
         condition: service_started
     networks:
       - darkseek
-    # Bounded restarts so a crash-looping crawler doesn't spin forever.
-    restart: on-failure
+    # Continuous seed-week mode: keep the crawler running across restarts.
+    restart: unless-stopped
     deploy:
       restart_policy:
         condition: on-failure
