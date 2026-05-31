@@ -109,7 +109,7 @@ def stats():
         ).fetchall()
     return jsonify({
         "total_pages": total,
-        "by_category": {r["category"]: r["cnt"] for r in by_category},
+        "by_category": {(r["category"] or "other"): r["cnt"] for r in by_category},
         "status": "ok"
     })
 
