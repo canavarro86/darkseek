@@ -379,9 +379,82 @@
       white-space: nowrap;
     }
 
+    /* ---- instant answer card ---- */
+    /* Rendered above search results when the query matches a command. */
+    .instant-card {
+      border: 1px solid rgba(0,255,65,0.12);
+      border-left: 3px solid #00ff41;
+      background: rgba(0,255,65,0.03);
+      margin-bottom: 1.25rem;
+      padding: 0.9rem 1.1rem;
+    }
+    .instant-head {
+      display: flex;
+      align-items: center;
+      color: rgba(0,255,65,0.45);
+      font-size: 11px;
+      letter-spacing: 2px;
+      margin-bottom: 0.75rem;
+    }
+    .instant-close {
+      margin-left: auto;
+      background: none;
+      border: none;
+      color: rgba(0,255,65,0.45);
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 16px;
+      line-height: 1;
+      padding: 0 0.25rem;
+    }
+    .instant-close:hover { color: #00ff41; }
+    .instant-body {
+      color: #00ff41;
+      font-size: 0.95rem;
+      line-height: 1.6;
+      word-break: break-all;
+      user-select: text;          /* result must be selectable/copyable */
+      background: rgba(0,255,65,0.04);
+      border: 1px solid rgba(0,255,65,0.12);
+      padding: 0.65rem 0.75rem;
+      margin-bottom: 0.7rem;
+    }
+    .instant-body.qr {
+      background: #0a0a0a;        /* QR needs a flat dark backdrop to scan */
+      display: flex;
+      justify-content: center;
+    }
+    .instant-body.err { color: rgba(255,80,80,0.85); }
+    .instant-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .instant-btn {
+      background: rgba(0,255,65,0.08);
+      border: 1px solid rgba(0,255,65,0.28);
+      color: #00ff41;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 11px;
+      letter-spacing: 1.5px;
+      padding: 0.5rem 1rem;
+      text-transform: uppercase;
+      transition: background 0.15s, color 0.15s;
+    }
+    .instant-btn:hover { background: rgba(0,255,65,0.2); }
+    .instant-btn.copied { background: rgba(0,255,65,0.3); color: #e0ffe8; }
+    .instant-note {
+      color: rgba(0,255,65,0.4);
+      font-size: 0.72rem;
+      letter-spacing: 1px;
+      margin-top: 0.5rem;
+      line-height: 1.5;
+    }
+
     /* ---- mobile ---- */
     @media (max-width: 600px) {
       .page          { padding: 0 0.75rem 7rem; }
+      .instant-head  { font-size: 14px; }
+      .instant-body  { font-size: 16px; }
+      .instant-btn   { font-size: 14px; min-height: 44px; }
+      .instant-note  { font-size: 13px; }
       .eyebrow       { font-size: 14px; letter-spacing: 2px; margin-top: 2.5rem; text-align: center; }
       .logo          { font-size: 40px; letter-spacing: 3px; }
       .subtitle      { font-size: 14px; letter-spacing: 2px; }
@@ -488,6 +561,7 @@
 
   <div class="nav-links">
     <a href="/submit" class="submit-link">+ add onion site to index</a>
+    <a href="/faq" class="submit-link">// commands</a>
     <a href="/donate" class="submit-link">♥ support darkseek</a>
   </div>
 
@@ -504,6 +578,9 @@
     <button class="filter-btn" data-cat="service" onclick="setCategory(this, 'service')">Service</button>
     <button class="filter-btn" data-cat="other"   onclick="setCategory(this, 'other')">Other</button>
   </div>
+
+  <!-- instant answer card target — sits above normal search results -->
+  <div id="instant-area" style="width:100%;max-width:640px;"></div>
 
   <main id="results-area"></main>
 
@@ -523,11 +600,18 @@
     const pg  = parseInt(p.get('page')) || 1;
     if (q) {
       document.getElementById('query').value = q;
-      state.query    = q;
-      state.page     = pg;
-      state.category = cat;
-      syncCategoryUI(cat);
-      fetchResults();
+      // A deep-linked query (e.g. from the commands page ?q=...) may itself be
+      // a command — route it the same way a typed query would be.
+      const cmd = matchCommand(q);
+      if (cmd) {
+        runCommand(cmd);
+      } else {
+        state.query    = q;
+        state.page     = pg;
+        state.category = cat;
+        syncCategoryUI(cat);
+        fetchResults();
+      }
     }
     loadStats();
   });
@@ -539,8 +623,12 @@
     doSearch();
   });
 
+  // Debounced live search while typing. Commands are NOT auto-run here — they
+  // wait for an explicit submit so we never fire network calls (ip/shorten) or
+  // heavy work on every keystroke.
   const debouncedSearch = debounce(() => {
-    if (queryEl.value.trim()) doSearch();
+    const v = queryEl.value.trim();
+    if (v && !matchCommand(v)) doSearch();
   }, 300);
   queryEl.addEventListener('input', debouncedSearch);
 
@@ -577,6 +665,10 @@
   function doSearch() {
     const q = document.getElementById('query').value.trim();
     if (!q) return;
+    // Command interception happens BEFORE any network search.
+    const cmd = matchCommand(q);
+    if (cmd) { runCommand(cmd); return; }
+    clearInstant();
     state.query = q;
     state.page  = 1;
     pushUrl();
@@ -714,6 +806,305 @@
       .replace(/'/g, '&#39;');
   }
   function escAttr(s) { return escHtml(s); }
+
+  /* =====================================================================
+     INSTANT ANSWER COMMANDS
+     Typed in the search box, intercepted before hitting the search API.
+     matchCommand() is an O(1) prefix check (no regex per keystroke).
+     ===================================================================== */
+
+  const CDN_QRCODE   = 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js';
+  const CDN_SPARKMD5 = 'https://cdnjs.cloudflare.com/ajax/libs/spark-md5/3.0.2/spark-md5.min.js';
+
+  // Parse a raw query into {name, arg}. Returns null for a normal search.
+  // Prefix matching is case-insensitive on the command word; the argument
+  // keeps its original case (matters for base64/hash/calc).
+  function matchCommand(raw) {
+    const q = raw.trim();
+    const lower = q.toLowerCase();
+    if (lower === 'passphrase') return { name: 'passphrase', arg: '' };
+    if (lower === 'ip')         return { name: 'ip', arg: '' };
+
+    const pairs = [
+      ['base64 encode ', 'b64enc'],
+      ['base64 decode ', 'b64dec'],
+      ['qr ',            'qr'],
+      ['hash ',          'hash'],
+      ['sha1 ',          'sha1'],
+      ['md5 ',           'md5'],
+      ['calc ',          'calc'],
+      ['shorten ',       'shorten'],
+    ];
+    for (const [prefix, name] of pairs) {
+      if (lower.startsWith(prefix)) return { name, arg: q.slice(prefix.length).trim() };
+    }
+    return null;
+  }
+
+  // Lazy-load an external script once; resolves when the global is ready.
+  // Used so qrcodejs / spark-md5 only download on first use of their command.
+  const _loaded = {};
+  function loadScript(src) {
+    if (_loaded[src]) return _loaded[src];
+    _loaded[src] = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.async = true;
+      s.onload = () => resolve();
+      s.onerror = () => { delete _loaded[src]; reject(new Error('failed to load ' + src)); };
+      document.head.appendChild(s);
+    });
+    return _loaded[src];
+  }
+
+  function clearInstant() {
+    document.getElementById('instant-area').innerHTML = '';
+  }
+
+  // Render the instant answer card. `bodyHtml` is trusted markup built by the
+  // caller (callers escape user data themselves). Returns the body element so
+  // async handlers (QR, hashes) can fill it in after render.
+  function showInstant(name, bodyHtml, opts = {}) {
+    clearInstant();
+    const card = document.createElement('div');
+    card.className = 'instant-card';
+    card.innerHTML = `
+      <div class="instant-head">// ${escHtml(name)} //
+        <button class="instant-close" title="close" aria-label="close">&times;</button>
+      </div>
+      <div class="instant-body ${opts.qr ? 'qr' : ''} ${opts.err ? 'err' : ''}">${bodyHtml}</div>
+      <div class="instant-actions"></div>
+      ${opts.note ? `<div class="instant-note">${escHtml(opts.note)}</div>` : ''}
+    `;
+    document.getElementById('instant-area').appendChild(card);
+    card.querySelector('.instant-close').addEventListener('click', clearInstant);
+
+    const actions = card.querySelector('.instant-actions');
+    // COPY button copies whatever text the caller supplies.
+    if (opts.copy != null) {
+      const copyBtn = makeBtn('Copy', () => copyText(String(opts.copy), copyBtn));
+      actions.appendChild(copyBtn);
+    }
+    // Extra buttons, e.g. "regenerate" for passphrase.
+    (opts.buttons || []).forEach(b => actions.appendChild(makeBtn(b.label, b.onClick)));
+    if (!actions.children.length) actions.remove();
+
+    return card.querySelector('.instant-body');
+  }
+
+  function makeBtn(label, onClick) {
+    const b = document.createElement('button');
+    b.className = 'instant-btn';
+    b.textContent = label;
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
+  // Clipboard write with a fallback for non-secure (http) .onion contexts
+  // where navigator.clipboard is unavailable.
+  async function copyText(text, btn) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (e) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch (_) {}
+      document.body.removeChild(ta);
+    }
+    if (btn) {
+      const orig = btn.textContent;
+      btn.textContent = 'Copied ✓';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1500);
+    }
+  }
+
+  function instantError(name, msg) {
+    showInstant(name, escHtml(msg), { err: true });
+  }
+
+  // Dispatch a parsed command to its handler.
+  function runCommand(cmd) {
+    switch (cmd.name) {
+      case 'qr':         return cmdQR(cmd.arg);
+      case 'b64enc':     return cmdBase64Encode(cmd.arg);
+      case 'b64dec':     return cmdBase64Decode(cmd.arg);
+      case 'hash':       return cmdHash('SHA-256', cmd.arg);
+      case 'sha1':       return cmdHash('SHA-1', cmd.arg);
+      case 'md5':        return cmdMD5(cmd.arg);
+      case 'passphrase': return cmdPassphrase();
+      case 'calc':       return cmdCalc(cmd.arg);
+      case 'ip':         return cmdIP();
+      case 'shorten':    return cmdShorten(cmd.arg);
+    }
+  }
+
+  // --- qr <text> : render QR via qrcodejs (lazy-loaded) ---
+  async function cmdQR(text) {
+    if (!text) return instantError('qr', 'usage: qr <text>');
+    const body = showInstant('qr ' + text, '<span style="color:rgba(0,255,65,0.4)">generating…</span>', { qr: true });
+    try {
+      await loadScript(CDN_QRCODE);
+      body.innerHTML = '';
+      new QRCode(body, {
+        text,
+        width: 180,
+        height: 180,
+        colorDark: '#00ff41',
+        colorLight: '#0a0a0a',
+        correctLevel: QRCode.CorrectLevel.M,
+      });
+    } catch (e) {
+      instantError('qr', 'could not load QR library');
+    }
+  }
+
+  // --- base64 encode <text> : UTF-8 safe via encodeURIComponent/escape ---
+  function cmdBase64Encode(text) {
+    if (!text) return instantError('base64 encode', 'usage: base64 encode <text>');
+    let out;
+    try {
+      out = btoa(unescape(encodeURIComponent(text)));
+    } catch (e) {
+      return instantError('base64 encode', 'could not encode input');
+    }
+    showInstant('base64 encode', escHtml(out), { copy: out });
+  }
+
+  // --- base64 decode <text> : reverse of the UTF-8 trick, guarded ---
+  function cmdBase64Decode(text) {
+    if (!text) return instantError('base64 decode', 'usage: base64 decode <text>');
+    let out;
+    try {
+      out = decodeURIComponent(escape(atob(text)));
+    } catch (e) {
+      return instantError('base64 decode', 'invalid base64 input');
+    }
+    showInstant('base64 decode', escHtml(out), { copy: out });
+  }
+
+  // --- hash/sha1 <text> : Web Crypto digest (async). Needs a secure context. ---
+  async function cmdHash(algo, text) {
+    const label = algo === 'SHA-1' ? 'sha1' : 'hash';
+    if (!text) return instantError(label, `usage: ${label} <text>`);
+    if (!(window.crypto && crypto.subtle)) {
+      return instantError(label, 'hashing needs a secure (https) context');
+    }
+    showInstant(label, '<span style="color:rgba(0,255,65,0.4)">computing…</span>');
+    try {
+      const buf = await crypto.subtle.digest(algo, new TextEncoder().encode(text));
+      const hex = [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+      showInstant(label, escHtml(hex), { copy: hex });
+    } catch (e) {
+      instantError(label, 'hashing failed');
+    }
+  }
+
+  // --- md5 <text> : spark-md5 (lazy-loaded, MD5 not in Web Crypto) ---
+  async function cmdMD5(text) {
+    if (!text) return instantError('md5', 'usage: md5 <text>');
+    showInstant('md5', '<span style="color:rgba(0,255,65,0.4)">computing…</span>');
+    try {
+      await loadScript(CDN_SPARKMD5);
+      const hex = SparkMD5.hash(text);
+      showInstant('md5', escHtml(hex), { copy: hex });
+    } catch (e) {
+      instantError('md5', 'could not load MD5 library');
+    }
+  }
+
+  // 256 common English words for passphrase generation (nouns/adj/verbs mix).
+  const PASSPHRASE_WORDS = [
+    'able','acid','aged','also','area','army','away','baby','back','ball','band','bank','base','bath','bear','beat',
+    'been','beer','bell','belt','bend','bent','best','bird','bite','blue','boat','body','bold','bone','book','boot',
+    'born','boss','both','bowl','bulk','burn','bush','busy','cake','call','calm','came','camp','card','care','case',
+    'cash','cast','cell','chat','chip','city','clay','club','coal','coat','code','cold','come','cook','cool','cope',
+    'copy','core','corn','cost','crew','crop','dark','data','date','dawn','days','dead','deal','dean','dear','debt',
+    'deep','deer','desk','dial','diet','dirt','dish','dock','does','done','door','dose','down','draw','drew','drop',
+    'drug','drum','dual','duck','dust','duty','each','earn','ease','east','easy','edge','else','even','ever','evil',
+    'exit','face','fact','fade','fail','fair','fall','farm','fast','fate','fear','feed','feel','feet','fell','file',
+    'fill','film','find','fine','fire','firm','fish','five','flag','flat','flow','food','foot','ford','fork','form',
+    'fort','four','free','frog','fuel','full','fund','gain','game','gate','gave','gear','gift','girl','give','glad',
+    'goal','goat','gold','golf','gone','good','gray','grew','grid','grip','grow','gulf','hair','half','hall','hand',
+    'hang','hard','harm','hate','have','hawk','head','heal','heap','hear','heat','held','hell','help','herb','herd',
+    'here','hero','hide','high','hill','hint','hire','hold','hole','holy','home','hood','hook','hope','horn','host',
+    'hour','huge','hull','hunt','hurt','icon','idea','idle','inch','into','iron','isle','item','jade','jail','jazz',
+    'jobs','join','joke','jump','jury','just','keen','keep','kept','kick','kind','king','kiss','kite','knee','knew',
+    'knot','know','lack','lake','lamb','lamp','land','lane','last','late','lava','lawn','lazy','lead','leaf','leak',
+  ];
+
+  // --- passphrase : 4 words chosen with CSPRNG (crypto.getRandomValues) ---
+  function cmdPassphrase() {
+    const n = PASSPHRASE_WORDS.length;            // 256 -> one byte maps cleanly
+    const rnd = crypto.getRandomValues(new Uint8Array(4));
+    const words = [...rnd].map(b => PASSPHRASE_WORDS[b % n]);
+    const phrase = words.join('-');
+    showInstant('passphrase', escHtml(phrase), {
+      copy: phrase,
+      buttons: [{ label: 'Regenerate', onClick: cmdPassphrase }],
+    });
+  }
+
+  // --- calc <expr> : arithmetic only, strict whitelist, no eval ---
+  function cmdCalc(expr) {
+    if (!expr) return instantError('calc', 'usage: calc <expression>');
+    // Whitelist: digits, + - * / % ( ) . and whitespace. Anything else rejected.
+    if (!/^[0-9+\-*/%().\s]+$/.test(expr)) {
+      return instantError('calc', 'invalid expression');
+    }
+    let result;
+    try {
+      // Function() instead of eval(); input is whitelisted to arithmetic only.
+      result = Function('"use strict"; return (' + expr + ')')();
+    } catch (e) {
+      return instantError('calc', 'invalid expression');
+    }
+    if (typeof result !== 'number' || !isFinite(result)) {
+      return instantError('calc', 'invalid expression');
+    }
+    const out = String(result);
+    showInstant('calc', escHtml(expr + ' = ' + out), { copy: out });
+  }
+
+  // --- ip : Tor exit node IP from backend, cached in sessionStorage ---
+  async function cmdIP() {
+    const NOTE = 'This is your Tor exit node IP, not your real IP.';
+    const cached = sessionStorage.getItem('exit_ip');
+    if (cached) {
+      return showInstant('ip', escHtml(cached), { copy: cached, note: NOTE });
+    }
+    showInstant('ip', '<span style="color:rgba(0,255,65,0.4)">resolving…</span>');
+    try {
+      const res = await fetch('/api/ip');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      const ip = data.ip || 'unknown';
+      sessionStorage.setItem('exit_ip', ip);
+      showInstant('ip', escHtml(ip), { copy: ip, note: NOTE });
+    } catch (e) {
+      instantError('ip', 'could not resolve IP');
+    }
+  }
+
+  // --- shorten <url> : proxy to TinyURL via backend ---
+  async function cmdShorten(url) {
+    if (!url) return instantError('shorten', 'usage: shorten <url>');
+    showInstant('shorten', '<span style="color:rgba(0,255,65,0.4)">shortening…</span>');
+    try {
+      const res = await fetch('/api/shorten?url=' + encodeURIComponent(url));
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.short) {
+        return instantError('shorten', data.error || 'could not shorten URL');
+      }
+      showInstant('shorten', escHtml(data.short), { copy: data.short });
+    } catch (e) {
+      instantError('shorten', 'network error');
+    }
+  }
 </script>
 
 </body>
