@@ -78,13 +78,11 @@ async def worker(
 
         try:
             if url in visited:
-                queue.task_done()
                 continue
             visited.add(url)
 
             if not should_recrawl(url):
                 logger.debug("Skip fresh URL: %s", url)
-                queue.task_done()
                 continue
 
             async with semaphore:
@@ -93,14 +91,12 @@ async def worker(
 
                 if html is None:
                     mark_dead(url)
-                    queue.task_done()
                     continue
 
                 parsed = parse_page(html, url)
 
                 if parsed is None:
                     logger.debug("Skipping thin page: %s", url)
-                    queue.task_done()
                     continue
 
                 meta = describe(html, url)

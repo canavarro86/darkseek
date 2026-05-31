@@ -1,8 +1,5 @@
 SocksPort 0.0.0.0:9050
-ControlPort 9051
-DNSPort 5353
-ExitPolicy reject *:*
-Log notice stderr
 RunAsDaemon 0
+Log notice stderr
 HiddenServiceDir /tmp/hidden_service/
 HiddenServicePort 80 nginx:80
