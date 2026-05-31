@@ -1,14 +1,11 @@
 import logging
-import os
-import sqlite3
-from contextlib import contextmanager
 from datetime import datetime, timezone
 
+# Single, unified DB layer (WAL + pragmas + migrations) lives in api.models.
+# The crawler image bundles api/, so this import works in both processes.
+from api.models import get_db
+
 logger = logging.getLogger(__name__)
-
-DATABASE_PATH = os.environ.get("DATABASE_PATH", "/app/db/darkseek.db")
-
-os.makedirs(os.path.dirname(DATABASE_PATH), exist_ok=True)
 
 RECRAWL_DAYS_DEFAULT = 7
 RECRAWL_DAYS_FORUM = 1
@@ -20,17 +17,6 @@ def _recrawl_days(url: str) -> int:
     if any(p in url_lower for p in FORUM_PATTERNS):
         return RECRAWL_DAYS_FORUM
     return RECRAWL_DAYS_DEFAULT
-
-
-@contextmanager
-def get_db():
-    conn = sqlite3.connect(DATABASE_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    try:
-        yield conn
-    finally:
-        conn.close()
 
 
 def should_recrawl(url: str) -> bool:

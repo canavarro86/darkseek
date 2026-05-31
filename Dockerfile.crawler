@@ -2,7 +2,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends sqlite3 && rm -rf /var/lib/apt/lists/*
+# sqlite3 for schema init, procps provides pgrep for the healthcheck.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends sqlite3 procps \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.crawler.txt .
 RUN pip install --no-cache-dir -r requirements.crawler.txt

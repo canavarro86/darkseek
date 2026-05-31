@@ -240,6 +240,32 @@
       color: var(--accent);
     }
     .page-btn:disabled { color: var(--muted); cursor: not-allowed; opacity: 0.4; }
+
+    /* ── Footer ── */
+    #site-footer {
+      color: var(--muted);
+      font-size: 0.72rem;
+      letter-spacing: 0.08em;
+      padding: 2rem 1rem 2.5rem;
+      text-align: center;
+    }
+    #site-footer span { color: var(--text-dim); }
+
+    /* ── Retry button (network errors) ── */
+    .retry-btn {
+      background: transparent;
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      cursor: pointer;
+      display: inline-block;
+      font-family: inherit;
+      font-size: 0.8rem;
+      letter-spacing: 0.05em;
+      margin-top: 1rem;
+      padding: 0.5rem 1.25rem;
+      transition: background 0.15s, color 0.15s;
+    }
+    .retry-btn:hover { background: var(--accent); color: #000; }
   </style>
 </head>
 <body>
@@ -266,6 +292,10 @@
 
 <main id="results-area"></main>
 
+<footer id="site-footer">
+  <span id="index-count">&nbsp;</span>
+</footer>
+
 <script>
   const PAGE_SIZE = 10;
   let state = { query: '', page: 1, category: '', loading: false };
@@ -284,11 +314,53 @@
       syncCategoryUI(cat);
       fetchResults();
     }
+    loadStats();
   });
 
-  document.getElementById('query').addEventListener('keydown', e => {
+  const queryEl = document.getElementById('query');
+
+  queryEl.addEventListener('keydown', e => {
     if (e.key === 'Enter') doSearch();
   });
+
+  // Debounce typing so we don't fire an API call on every keystroke.
+  const debouncedSearch = debounce(() => {
+    if (queryEl.value.trim()) doSearch();
+  }, 300);
+  queryEl.addEventListener('input', debouncedSearch);
+
+  // Keyboard shortcuts: "/" focuses search, Escape clears it.
+  document.addEventListener('keydown', e => {
+    if (e.key === '/' && document.activeElement !== queryEl) {
+      e.preventDefault();
+      queryEl.focus();
+    } else if (e.key === 'Escape') {
+      queryEl.value = '';
+      queryEl.focus();
+    }
+  });
+
+  function debounce(fn, ms) {
+    let t;
+    return (...args) => {
+      clearTimeout(t);
+      t = setTimeout(() => fn(...args), ms);
+    };
+  }
+
+  async function loadStats() {
+    try {
+      const res = await fetch('/stats');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (typeof data.total_pages === 'number') {
+        document.getElementById('index-count').textContent =
+          data.total_pages.toLocaleString() + ' pages indexed';
+      }
+    } catch (e) {
+      /* footer stat is non-critical — ignore */
+    }
+  }
 
   function doSearch() {
     const q = document.getElementById('query').value.trim();
@@ -344,7 +416,7 @@
       const data = await res.json();
       render(data);
     } catch (e) {
-      showError('Network error — is the API running?');
+      showError('Network error — is the API running?', true);
     } finally {
       state.loading = false;
       document.getElementById('search-btn').disabled = false;
@@ -356,9 +428,12 @@
       '<div class="state-msg"><span class="spinner"></span></div>';
   }
 
-  function showError(msg) {
+  function showError(msg, retry) {
+    const retryBtn = retry
+      ? `<div><button class="retry-btn" onclick="fetchResults()">Retry</button></div>`
+      : '';
     document.getElementById('results-area').innerHTML =
-      `<div class="state-msg error">Error: ${escHtml(msg)}</div>`;
+      `<div class="state-msg error">Error: ${escHtml(msg)}${retryBtn}</div>`;
   }
 
   function render(data) {

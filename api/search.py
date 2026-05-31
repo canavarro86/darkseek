@@ -15,6 +15,10 @@ def search_pages(
 
     # Escape FTS5 special characters so raw user input doesn't break the query
     safe_query = _escape_fts(query)
+    # After escaping the query can be empty (e.g. input was only punctuation);
+    # MATCH '' raises, so short-circuit to an empty result set.
+    if not safe_query:
+        return [], 0
 
     with get_db() as conn:
         if category:
@@ -68,6 +72,19 @@ def search_pages(
 
 
 def _escape_fts(query: str) -> str:
-    # Wrap each token in double quotes to treat them as phrases, not FTS operators
+    """Turn raw user input into a safe FTS5 MATCH expression.
+
+    Every token is wrapped in double quotes so FTS operators (AND/OR/NEAR/*/-)
+    are treated as literal text. Internal double quotes are doubled per the FTS5
+    string-literal grammar, otherwise a token like `a"b` would break out of the
+    quoting and inject operators. Returns "" for empty/whitespace-only input;
+    callers must treat "" as "no query" rather than passing it to MATCH.
+    """
     tokens = query.split()
-    return " ".join(f'"{t}"' for t in tokens if t)
+    escaped = []
+    for token in tokens:
+        if not token:
+            continue
+        safe = token.replace('"', '""')
+        escaped.append(f'"{safe}"')
+    return " ".join(escaped)

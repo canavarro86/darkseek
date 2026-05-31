@@ -14,5 +14,10 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 
-# gunicorn for production; workers=1 keeps SQLite WAL contention low
-CMD ["gunicorn", "api.main:app", "--bind", "0.0.0.0:8000", "--workers", "2", "--timeout", "30"]
+# gunicorn for production; keep workers low to limit SQLite WAL write contention.
+CMD ["gunicorn", "api.main:app", \
+     "--bind", "0.0.0.0:8000", \
+     "--workers", "2", \
+     "--timeout", "60", \
+     "--keep-alive", "5", \
+     "--worker-connections", "100"]
