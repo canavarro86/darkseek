@@ -19,4 +19,4 @@ RUN mkdir -p /app/db
 ENV PYTHONUNBUFFERED=1
 
 # Init DB schema then start the crawler
-CMD ["sh", "-c", "sqlite3 $DATABASE_PATH < /app/db/schema.sql && python -m crawler.spider"]
+CMD ["sh", "-c", "sqlite3 $DATABASE_PATH < /app/schema.sql && python -m crawler.spider"]
