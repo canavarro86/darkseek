@@ -26,7 +26,7 @@ def search_pages(
                 FROM pages_fts
                 JOIN pages p ON pages_fts.rowid = p.id
                 WHERE pages_fts MATCH ? AND p.category = ? AND p.is_alive = 1
-                ORDER BY (pages_fts.rank * 0.7 + (julianday(p.last_seen) - julianday('2026-01-01')) * 0.3) DESC
+                ORDER BY (pages_fts.rank * 0.6 + (julianday(p.last_seen) - julianday('2024-01-01')) * 0.4) DESC
                 LIMIT ? OFFSET ?
                 """,
                 (safe_query, category, page_size, offset),
@@ -49,7 +49,7 @@ def search_pages(
                 FROM pages_fts
                 JOIN pages p ON pages_fts.rowid = p.id
                 WHERE pages_fts MATCH ? AND p.is_alive = 1
-                ORDER BY (pages_fts.rank * 0.7 + (julianday(p.last_seen) - julianday('2026-01-01')) * 0.3) DESC
+                ORDER BY (pages_fts.rank * 0.6 + (julianday(p.last_seen) - julianday('2024-01-01')) * 0.4) DESC
                 LIMIT ? OFFSET ?
                 """,
                 (safe_query, page_size, offset),

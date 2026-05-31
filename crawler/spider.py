@@ -111,6 +111,7 @@ async def worker(
                     lang=meta.get("lang") or "other",
                     score=0.0,
                     content_hash=content_hash,
+                    page_type=parsed.get("page_type", "other"),
                 )
                 logger.info("Saved: [%s] %s", meta["category"], meta["title"][:80])
 
