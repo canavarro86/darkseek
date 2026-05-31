@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import time
 import uuid
 
 from dotenv import load_dotenv
@@ -54,11 +55,39 @@ CATEGORIES = {"forum", "market", "news", "wiki", "service", "other"}
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 MAX_QUERY_LEN = 200
 
+# v3 onion: 56 base32 chars [a-z2-7], optional path. Anchored to reject junk.
+ONION_RE = re.compile(r"^https?://[a-z2-7]{56}\.onion(/.*)?$")
+
+# In-memory per-IP submission rate limiter: 5 submissions per rolling hour.
+_submit_rate: dict[str, list[float]] = {}
+SUBMIT_LIMIT = 5
+SUBMIT_WINDOW = 3600
+
 
 def _sanitize_query(raw: str) -> str:
     """Strip NUL/control characters and clamp length on user search input."""
     cleaned = _CONTROL_CHARS.sub(" ", raw)
     return cleaned.strip()[:MAX_QUERY_LEN]
+
+
+def _client_ip() -> str:
+    """Real client IP behind the nginx reverse proxy."""
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+
+def _submit_allowed(ip: str) -> bool:
+    """Sliding-window rate check. Prunes stale timestamps on every call."""
+    now = time.time()
+    times = [t for t in _submit_rate.get(ip, []) if now - t < SUBMIT_WINDOW]
+    if len(times) >= SUBMIT_LIMIT:
+        _submit_rate[ip] = times
+        return False
+    times.append(now)
+    _submit_rate[ip] = times
+    return True
 
 
 @app.before_request
@@ -131,6 +160,41 @@ def search():
             "results": results,
         }
     )
+
+
+@app.post("/api/submit")
+def submit():
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+
+    if not ONION_RE.match(url):
+        return jsonify({"status": "error", "message": "Invalid .onion URL"}), 400
+
+    ip = _client_ip()
+    if not _submit_allowed(ip):
+        return jsonify({
+            "status": "error",
+            "message": "Rate limit exceeded — max 5 submissions per hour.",
+        }), 429
+
+    with get_db() as conn:
+        exists = conn.execute("SELECT 1 FROM pages WHERE url = ?", (url,)).fetchone()
+        if exists:
+            return jsonify({"status": "exists", "message": "Already indexed"})
+        conn.execute(
+            """
+            INSERT INTO pages (url, title, description, category, lang, is_alive, fail_count)
+            VALUES (?, ?, ?, ?, ?, 1, 0)
+            """,
+            (url, "Pending scan...", "Submitted by user, pending crawl", "other", "other"),
+        )
+        conn.commit()
+
+    logger.info("submit url=%r ip=%s -> queued", url, ip)
+    return jsonify({
+        "status": "queued",
+        "message": "Site queued for indexing. Check back in ~1 hour.",
+    })
 
 
 def run() -> None:

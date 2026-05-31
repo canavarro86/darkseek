@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS pages (
   score        REAL DEFAULT 0.0,
   is_alive     INTEGER DEFAULT 1,
   content_hash TEXT,
-  page_type    TEXT DEFAULT 'other'
+  page_type    TEXT DEFAULT 'other',
+  fail_count   INTEGER DEFAULT 0
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(

@@ -69,6 +69,9 @@ def migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE pages ADD COLUMN content_hash TEXT")
     if not _column_exists(conn, "pages", "page_type"):
         conn.execute("ALTER TABLE pages ADD COLUMN page_type TEXT DEFAULT 'other'")
+    # Consecutive fetch-failure counter for dead-site retry logic.
+    if not _column_exists(conn, "pages", "fail_count"):
+        conn.execute("ALTER TABLE pages ADD COLUMN fail_count INTEGER DEFAULT 0")
 
     # Single-row table holding the latest crawler cycle metrics for /metrics.
     conn.execute(

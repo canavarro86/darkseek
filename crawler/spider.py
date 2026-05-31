@@ -4,7 +4,8 @@ import logging
 import os
 import sys
 import time
-from typing import Set
+from datetime import datetime, timedelta, timezone
+from typing import Set, Tuple
 
 import httpx
 from dotenv import load_dotenv
@@ -15,7 +16,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from api.models import record_crawl_stats
 from crawler.ai_describe import describe
-from crawler.models import mark_dead, should_recrawl, upsert_page
+from crawler.models import (
+    get_crawl_urls,
+    mark_dead,
+    revive_check,
+    should_recrawl,
+    upsert_page,
+)
 from crawler.parser import parse_page
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -43,7 +50,6 @@ SEED_URLS = [
 ]
 
 MAX_RETRIES = 3
-CYCLE_SLEEP = int(os.environ.get("CYCLE_SLEEP", "3600"))
 
 # Tor circuits are slow to build but reads should not hang forever. Split the
 # connect budget from the read budget so a dead peer fails fast while a slow
@@ -55,7 +61,14 @@ TOR_CHECK_URL = "https://check.torproject.org/api/ip"
 TOR_VERIFY_RETRIES = 5
 TOR_VERIFY_BACKOFF = 5
 
-_visited: Set[str] = set()
+# HTTP statuses that mean "temporarily unavailable", not "dead". Never mark a
+# site dead on these — it's rate limiting / overload, not a missing service.
+TRANSIENT_STATUSES = {403, 429, 503}
+
+# fetch() outcomes
+FETCH_OK = "ok"        # html returned
+FETCH_DEAD = "dead"    # connection-level failure -> caller marks dead
+FETCH_SKIP = "skip"    # HTTP error / transient -> caller skips, no mark_dead
 
 
 async def verify_tor(client: httpx.AsyncClient) -> bool:
@@ -85,21 +98,40 @@ async def verify_tor(client: httpx.AsyncClient) -> bool:
     return False
 
 
-async def fetch(client: httpx.AsyncClient, url: str) -> str | None:
+async def fetch(client: httpx.AsyncClient, url: str) -> Tuple[str | None, str]:
+    """Fetch a URL and classify the outcome.
+
+    Returns (html, outcome):
+      - (text, FETCH_OK)   on success
+      - (None, FETCH_DEAD) only on connection-level failure (ConnectError /
+                           TimeoutException) — the caller may mark the site dead
+      - (None, FETCH_SKIP) on any HTTP status error (incl. 403/429/503) or other
+                           error — transient/not-dead, caller just skips
+    """
     for attempt in range(MAX_RETRIES):
         try:
             r = await client.get(url, timeout=HTTP_TIMEOUT, follow_redirects=True)
             r.raise_for_status()
-            return r.text
+            return r.text, FETCH_OK
         except httpx.HTTPStatusError as e:
-            logger.warning("HTTP %d: %s", e.response.status_code, url)
-            return None
-        except Exception as e:
+            status = e.response.status_code
+            if status in TRANSIENT_STATUSES:
+                logger.warning("HTTP %d (transient, not dead): %s", status, url)
+            else:
+                logger.warning("HTTP %d: %s", status, url)
+            return None, FETCH_SKIP
+        except (httpx.ConnectError, httpx.TimeoutException) as e:
+            # Connection-level failure: retry, and if it persists, it's dead.
             if attempt < MAX_RETRIES - 1:
                 await asyncio.sleep(2)
             else:
-                logger.warning("Failed after %d attempts: %s — %s", MAX_RETRIES, url, e)
-    return None
+                logger.warning("Connection failed after %d attempts: %s — %s", MAX_RETRIES, url, e)
+                return None, FETCH_DEAD
+        except Exception as e:
+            # Anything else (proxy hiccup, malformed response): skip, don't kill.
+            logger.warning("Fetch error (skipping): %s — %s", url, e)
+            return None, FETCH_SKIP
+    return None, FETCH_DEAD
 
 
 async def worker(
@@ -127,10 +159,13 @@ async def worker(
 
             async with semaphore:
                 logger.info("Crawling %s", url)
-                html = await fetch(client, url)
+                html, outcome = await fetch(client, url)
 
                 if html is None:
-                    mark_dead(url)
+                    # Only connection-level failures count toward dead-marking;
+                    # HTTP 403/429/503 and other errors are skipped silently.
+                    if outcome == FETCH_DEAD:
+                        mark_dead(url)
                     continue
 
                 parsed = parse_page(html, url)
@@ -166,15 +201,47 @@ async def worker(
             queue.task_done()
 
 
-async def crawl_cycle() -> None:
+def seconds_until_midnight_utc() -> float:
+    now = datetime.now(timezone.utc)
+    tomorrow = (now + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return (tomorrow - now).total_seconds()
+
+
+def is_weekly_crawl() -> bool:
+    # Sunday == 6. Weekly full crawl revisits dead sites too.
+    return datetime.now(timezone.utc).weekday() == 6
+
+
+def _build_seed_set(weekly: bool) -> Set[str]:
+    """Assemble the URL set for a cycle: seeds + revived + scheduled DB URLs."""
+    urls: Set[str] = set(SEED_URLS)
+
+    # Always give long-dead sites a fresh chance at the top of a cycle.
+    urls.update(revive_check())
+
+    # Daily: stale live sites. Weekly: everything, including currently-dead.
+    urls.update(get_crawl_urls(include_dead=weekly))
+    return urls
+
+
+async def crawl_cycle(weekly: bool = False) -> None:
     queue: asyncio.Queue = asyncio.Queue()
     semaphore = asyncio.Semaphore(CRAWLER_WORKERS)
+    # Fresh per-cycle visited set so each scheduled run re-crawls from scratch
+    # (freshness is still gated by should_recrawl()).
+    visited: Set[str] = set()
     stats = {"saved": 0}
     started = time.monotonic()
 
-    # Remove seeds from visited so should_recrawl re-evaluates them each cycle
-    for url in SEED_URLS:
-        _visited.discard(url)
+    seeds = _build_seed_set(weekly)
+    logger.info(
+        "%s crawl: queuing %d URLs (seeds + revived + scheduled)",
+        "Weekly" if weekly else "Daily",
+        len(seeds),
+    )
+    for url in seeds:
         await queue.put(url)
 
     transport = httpx.AsyncHTTPTransport(proxy=TOR_PROXY)
@@ -185,7 +252,7 @@ async def crawl_cycle() -> None:
             return
 
         tasks = [
-            asyncio.create_task(worker(queue, _visited, semaphore, client, stats))
+            asyncio.create_task(worker(queue, visited, semaphore, client, stats))
             for _ in range(CRAWLER_WORKERS)
         ]
         await asyncio.gather(*tasks)
@@ -194,7 +261,7 @@ async def crawl_cycle() -> None:
     pages_per_hour = stats["saved"] / elapsed * 3600
     logger.info(
         "Crawl cycle done. Visited %d URLs, saved %d pages in %.0fs (%.1f pages/hour).",
-        len(_visited),
+        len(visited),
         stats["saved"],
         elapsed,
         pages_per_hour,
@@ -206,11 +273,18 @@ async def crawl_cycle() -> None:
 
 
 async def run() -> None:
+    # Bootstrap crawl on startup, then run on the 00:00 UTC schedule:
+    # every day a daily crawl, Sundays a weekly full crawl. Between runs the
+    # crawler sleeps and the API serves results straight from the DB.
+    logger.info("Starting bootstrap crawl")
+    await crawl_cycle(weekly=is_weekly_crawl())
     while True:
-        logger.info("Starting crawl cycle")
-        await crawl_cycle()
-        logger.info("Sleeping %ds before next cycle", CYCLE_SLEEP)
-        await asyncio.sleep(CYCLE_SLEEP)
+        sleep_s = seconds_until_midnight_utc()
+        logger.info("Sleeping %.0fs until next scheduled crawl (00:00 UTC)", sleep_s)
+        await asyncio.sleep(sleep_s)
+        weekly = is_weekly_crawl()
+        logger.info("Starting %s crawl", "weekly" if weekly else "daily")
+        await crawl_cycle(weekly=weekly)
 
 
 if __name__ == "__main__":
