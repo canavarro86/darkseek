@@ -16,7 +16,7 @@ services:
       dockerfile: Dockerfile.api
     env_file: .env
     volumes:
-      - db_data:/app/db
+      - /opt/darkseek_db:/app/db
     depends_on:
       - tor
     networks:
