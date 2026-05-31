@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS pages (
   indexed_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   last_seen    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   score        REAL DEFAULT 0.0,
-  is_alive     INTEGER DEFAULT 1
+  is_alive     INTEGER DEFAULT 1,
+  content_hash TEXT
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(

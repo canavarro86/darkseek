@@ -57,22 +57,29 @@ def upsert_page(
     category: str,
     lang: str,
     score: float = 0.0,
+    content_hash: str | None = None,
 ) -> None:
     with get_db() as conn:
         conn.execute(
             """
-            INSERT INTO pages (url, title, description, category, lang, score, is_alive, last_seen)
-            VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+            INSERT INTO pages (url, title, description, category, lang, score, is_alive, last_seen, content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, ?)
             ON CONFLICT(url) DO UPDATE SET
-                title       = excluded.title,
-                description = excluded.description,
-                category    = excluded.category,
-                lang        = excluded.lang,
-                score       = excluded.score,
-                is_alive    = 1,
-                last_seen   = CURRENT_TIMESTAMP
+                title        = excluded.title,
+                description  = excluded.description,
+                category     = excluded.category,
+                lang         = excluded.lang,
+                score        = excluded.score,
+                is_alive     = 1,
+                content_hash = excluded.content_hash,
+                last_seen    = CASE
+                    WHEN excluded.content_hash IS NOT NULL
+                         AND excluded.content_hash != COALESCE(pages.content_hash, '')
+                    THEN CURRENT_TIMESTAMP
+                    ELSE pages.last_seen
+                    END
             """,
-            (url, title, description, category, lang, score),
+            (url, title, description, category, lang, score, content_hash),
         )
         conn.commit()
 

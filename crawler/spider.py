@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import os
 import sys
@@ -99,6 +100,7 @@ async def worker(
                     logger.debug("Skipping thin page: %s", url)
                     continue
 
+                content_hash = hashlib.md5(html.encode()).hexdigest()
                 meta = describe(html, url)
 
                 upsert_page(
@@ -108,6 +110,7 @@ async def worker(
                     category=meta.get("category") or "other",
                     lang=meta.get("lang") or "other",
                     score=0.0,
+                    content_hash=content_hash,
                 )
                 logger.info("Saved: [%s] %s", meta["category"], meta["title"][:80])
 
