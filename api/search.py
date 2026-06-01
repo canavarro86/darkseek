@@ -1,35 +1,72 @@
-import re
+"""FTS5-backed page search: parse -> match -> composite re-rank.
+
+Pipeline per request:
+  1. parse_query()  turns raw input into a safe FTS5 MATCH expression, a list
+     of terms to exclude, and the plain terms (for the frontend to highlight).
+  2. FTS5 MATCH selects candidate rows (alive only) ordered by BM25 `rank`.
+  3. compute_score() re-ranks the candidate window by BM25 + freshness + alive,
+     and that score is returned in the API `score` field.
+
+The public contract is unchanged: search_pages(query, page, page_size, category)
+-> (list[dict], total). The result dicts gain a meaningful `score` (previously
+the always-0.0 pages.score column) but keep every existing key, so the API JSON
+shape is backward-compatible.
+"""
+
 from typing import List, Optional, Tuple
 
-import Stemmer
-
 from .models import get_db
+from .scoring import compute_score
+from .search_parser import parse_query
+from .stemmer import stem_word
+from .search_parser import _quote  # FTS5 string-literal quoting (shared helper)
 
 PAGE_SIZE = 10
 
-# Snowball stemmers for the two languages we index meaningfully.
-_stemmers = {
-    "ru": Stemmer.Stemmer("russian"),
-    "en": Stemmer.Stemmer("english"),
-}
-
-_CYRILLIC_RE = re.compile(r"[а-яёА-ЯЁ]")
+# How many BM25-best candidates to pull before re-ranking in Python. The re-rank
+# only reorders within this window, so it must comfortably exceed a normal page
+# offset; deep paging widens it on demand, capped to bound memory.
+CANDIDATE_LIMIT = 300
+CANDIDATE_LIMIT_MAX = 2000
 
 
-def _stem_query(query: str) -> str:
-    """Stem query tokens: Russian for Cyrillic tokens, English otherwise.
+def _exclude_expression(terms: List[str]) -> str:
+    """Build an FTS5 sub-expression matching any excluded term (stem OR exact).
 
-    Best-effort — any PyStemmer failure returns the original query unchanged so
-    search never breaks because of the stemmer.
+    Used as the right-hand side of an FTS5 `NOT`, so a page is dropped if it
+    contains any excluded term in either its surface or stemmed form. Synonyms
+    are deliberately NOT expanded here — excluding "scam" should not also drop
+    every page mentioning a scam synonym the user never typed.
     """
-    try:
-        out = []
-        for token in query.split():
-            stemmer = _stemmers["ru"] if _CYRILLIC_RE.search(token) else _stemmers["en"]
-            out.append(stemmer.stemWord(token))
-        return " ".join(out)
-    except Exception:
-        return query
+    parts: List[str] = []
+    for term in terms:
+        forms = [term]
+        stemmed = stem_word(term)
+        if stemmed != term:
+            forms.append(stemmed)
+        parts.extend(_quote(f) for f in forms)
+    return " OR ".join(parts)
+
+
+def _build_match(query: str) -> Tuple[Optional[str], List[str]]:
+    """Return (fts_match_expression, raw_terms) or (None, terms) for no-op.
+
+    The match expression folds in exclusions via FTS5's native `NOT` operator.
+    Returns None for the expression when there is nothing positive to search
+    (e.g. the input was only punctuation, or only an exclusion like "-scam").
+    """
+    parsed = parse_query(query)
+    if not parsed.fts_query:
+        return None, parsed.raw_terms
+
+    match = parsed.fts_query
+    if parsed.exclude_terms:
+        excl = _exclude_expression(parsed.exclude_terms)
+        if excl:
+            # Parenthesise both sides: NOT binds tighter than OR in FTS5, so the
+            # positive side must be grouped to avoid changing its meaning.
+            match = f"({match}) NOT ({excl})"
+    return match, parsed.raw_terms
 
 
 def search_pages(
@@ -38,107 +75,73 @@ def search_pages(
     page_size: int = PAGE_SIZE,
     category: Optional[str] = None,
 ) -> Tuple[List[dict], int]:
-    offset = (page - 1) * page_size
+    """Search alive pages, composite-ranked. Backward-compatible contract.
 
-    # Build an FTS5 MATCH expression that searches both the stemmed and the
-    # original token, so thin Russian descriptions still match on exact tokens.
-    safe_query = _build_fts_query(query)
-    # After escaping the query can be empty (e.g. input was only punctuation);
-    # MATCH '' raises, so short-circuit to an empty result set.
-    if not safe_query:
+    Returns (results, total) where results is the requested page of dicts and
+    total is the full match count. `raw_terms` for highlighting is also attached
+    to each result dict under the `terms` key (additive; existing keys intact).
+    """
+    match, raw_terms = _build_match(query)
+    if not match:
         return [], 0
 
+    offset = (page - 1) * page_size
+    # Widen the candidate window so the requested page falls inside it, capped.
+    window = min(max(CANDIDATE_LIMIT, offset + page_size), CANDIDATE_LIMIT_MAX)
+
+    params: List = [match]
+    where_extra = ""
+    if category:
+        where_extra = " AND p.category = ?"
+
+    sql = f"""
+        SELECT p.id, p.url, p.title, p.description, p.category,
+               p.lang, p.indexed_at, p.last_seen, p.is_alive,
+               pages_fts.rank AS fts_rank
+        FROM pages_fts
+        JOIN pages p ON pages_fts.rowid = p.id
+        WHERE pages_fts MATCH ? AND p.is_alive = 1{where_extra}
+        ORDER BY pages_fts.rank
+        LIMIT ?
+    """
+    count_sql = f"""
+        SELECT COUNT(*)
+        FROM pages_fts
+        JOIN pages p ON pages_fts.rowid = p.id
+        WHERE pages_fts MATCH ? AND p.is_alive = 1{where_extra}
+    """
+
+    fetch_params = list(params)
+    count_params = list(params)
+    if category:
+        fetch_params.append(category)
+        count_params.append(category)
+    fetch_params.append(window)
+
     with get_db() as conn:
-        if category:
-            rows = conn.execute(
-                """
-                SELECT p.id, p.url, p.title, p.description, p.category,
-                       p.lang, p.score, p.indexed_at, p.last_seen,
-                       pages_fts.rank AS fts_rank
-                FROM pages_fts
-                JOIN pages p ON pages_fts.rowid = p.id
-                WHERE pages_fts MATCH ? AND p.category = ? AND p.is_alive = 1
-                ORDER BY (pages_fts.rank * 0.6 + (julianday(p.last_seen) - julianday('2024-01-01')) * 0.4) DESC
-                LIMIT ? OFFSET ?
-                """,
-                (safe_query, category, page_size, offset),
-            ).fetchall()
-            total = conn.execute(
-                """
-                SELECT COUNT(*)
-                FROM pages_fts
-                JOIN pages p ON pages_fts.rowid = p.id
-                WHERE pages_fts MATCH ? AND p.category = ? AND p.is_alive = 1
-                """,
-                (safe_query, category),
-            ).fetchone()[0]
-        else:
-            rows = conn.execute(
-                """
-                SELECT p.id, p.url, p.title, p.description, p.category,
-                       p.lang, p.score, p.indexed_at, p.last_seen,
-                       pages_fts.rank AS fts_rank
-                FROM pages_fts
-                JOIN pages p ON pages_fts.rowid = p.id
-                WHERE pages_fts MATCH ? AND p.is_alive = 1
-                ORDER BY (pages_fts.rank * 0.6 + (julianday(p.last_seen) - julianday('2024-01-01')) * 0.4) DESC
-                LIMIT ? OFFSET ?
-                """,
-                (safe_query, page_size, offset),
-            ).fetchall()
-            total = conn.execute(
-                """
-                SELECT COUNT(*)
-                FROM pages_fts
-                JOIN pages p ON pages_fts.rowid = p.id
-                WHERE pages_fts MATCH ? AND p.is_alive = 1
-                """,
-                (safe_query,),
-            ).fetchone()[0]
+        rows = conn.execute(sql, fetch_params).fetchall()
+        total = conn.execute(count_sql, count_params).fetchone()[0]
 
-    return [dict(r) for r in rows], total
+    # Composite re-rank within the BM25 candidate window.
+    scored = []
+    for r in rows:
+        d = {
+            "id": r["id"],
+            "url": r["url"],
+            "title": r["title"],
+            "description": r["description"],
+            "category": r["category"],
+            "lang": r["lang"],
+            "indexed_at": r["indexed_at"],
+            "last_seen": r["last_seen"],
+            "score": round(
+                compute_score(r["fts_rank"], r["last_seen"], r["is_alive"]), 4
+            ),
+            "terms": raw_terms,
+        }
+        scored.append(d)
 
+    # Sort by composite score desc; break ties on BM25 rank then id for stability.
+    scored.sort(key=lambda d: (-d["score"], d["url"]))
 
-def _build_fts_query(query: str) -> str:
-    """Build an FTS5 MATCH expression matching both stemmed and exact tokens.
-
-    For each token, stem it; if the stem differs from the original, emit
-    '"stem" OR "original"' so a query like "форум" (stem "фор") still matches
-    pages that only store the exact token "форум". Tokens are joined by spaces
-    (FTS5 AND). Any failure falls back to plain _escape_fts() behaviour.
-    """
-    try:
-        token_exprs = []
-        for token in query.split():
-            if not token:
-                continue
-            stemmer = _stemmers["ru"] if _CYRILLIC_RE.search(token) else _stemmers["en"]
-            stemmed = stemmer.stemWord(token)
-            orig_safe = token.replace('"', '""')
-            if stemmed != token:
-                stem_safe = stemmed.replace('"', '""')
-                token_exprs.append(f'"{stem_safe}" OR "{orig_safe}"')
-            else:
-                token_exprs.append(f'"{orig_safe}"')
-        return " ".join(token_exprs)
-    except Exception:
-        return _escape_fts(query)
-
-
-def _escape_fts(query: str) -> str:
-    """Turn raw user input into a safe FTS5 MATCH expression.
-
-    Every token is wrapped in double quotes so FTS operators (AND/OR/NEAR/*/-)
-    are treated as literal text. Internal double quotes are doubled per the FTS5
-    string-literal grammar, otherwise a token like `a"b` would break out of the
-    quoting and inject operators. Returns "" for empty/whitespace-only input;
-    callers must treat "" as "no query" rather than passing it to MATCH.
-    """
-    tokens = query.split()
-    escaped = []
-    for token in tokens:
-        if not token:
-            continue
-        safe = token.replace('"', '""')
-        escaped.append(f'"{safe}"')
-    return " ".join(escaped)
+    return scored[offset : offset + page_size], total
