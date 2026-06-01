@@ -12,8 +12,10 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Set, Tuple
 from urllib.parse import urlparse
@@ -27,6 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from api.models import record_crawl_stats
 from crawler.ai_describe import describe
+from crawler.dead_cache import clear_dead, is_dead, record_dead, revive_candidates
 from crawler.models import (
     get_crawl_urls,
     mark_dead,
@@ -84,6 +87,82 @@ SEED_URLS = [
     "http://7sk2kov2xwx6cbc32phynrifegg6pklmzs7luwcggtzrnlsolxxuyfyd.onion/en/index.html",
     "https://www.bbcweb3hytmzhn5d532owbu6oqadra5z3ar726vq5kgwwn6aucdccrad.onion/learningenglish/",
 ]
+
+# --- Bounded-execution limits (crawl-trap & runaway protection) -------------
+# Every value is a deliberate ceiling so an unattended run can't grow without
+# bound (memory) or loop forever (a paginating marketplace ate a whole cycle).
+#
+# MAX_DEPTH: links are followed at most 5 hops from a seed. News/wiki content is
+#   reachable within a few hops; beyond that is mostly low-value pagination.
+# MAX_PAGES_PER_RUN: hard stop at 10k saved pages/run. At ~1.5s/page that is a
+#   multi-hour cycle — enough to make progress, bounded enough to release memory.
+# PER_HOST_CAP: 200 pages/host/run. One host (BBC) had reached 1,603 pages (4%
+#   of the index); 200 keeps any single site from dominating search results.
+# TRAP_NUMERIC_THRESHOLD: >100 URLs from one host that differ only by a numeric
+#   path/query segment (…/category/1.html, /2.html, …) flags pagination-trap
+#   behaviour; that host's numeric links are then de-prioritized (dropped).
+MAX_DEPTH = 5
+MAX_PAGES_PER_RUN = 10_000
+PER_HOST_CAP = 200
+TRAP_NUMERIC_THRESHOLD = 100
+
+# Matches a run of digits in a URL path/query so /category/12.html and
+# /category/13.html collapse to the same template /category/#.html.
+_NUMERIC_SEG_RE = re.compile(r"\d+")
+
+
+def _host(url: str) -> str:
+    """Authority component (scheme-stripped host[:port]) used for per-host caps."""
+    return urlparse(url).netloc
+
+
+def _numeric_template(url: str) -> str:
+    """URL with digit runs masked, so numeric-only variants share a key."""
+    p = urlparse(url)
+    return f"{p.netloc}{_NUMERIC_SEG_RE.sub('#', p.path)}?{_NUMERIC_SEG_RE.sub('#', p.query)}"
+
+
+class RunState:
+    """Per-cycle, in-memory bookkeeping for the bounded-crawl invariants.
+
+    Not persisted — every cycle starts clean. All counters are bounded by the
+    number of distinct hosts/templates encountered, which the caps above keep
+    small, so this never grows without limit.
+    """
+
+    def __init__(self) -> None:
+        self.saved = 0                              # pages written this run
+        self.host_pages: Counter = Counter()        # host -> pages saved
+        self.host_templates: dict[str, Counter] = {}  # host -> template -> count
+        self.trapped_hosts: set[str] = set()         # hosts flagged as traps
+        self.capped_hosts: set[str] = set()          # hosts that hit PER_HOST_CAP (logged once)
+
+    def run_ceiling_reached(self) -> bool:
+        return self.saved >= MAX_PAGES_PER_RUN
+
+    def host_capped(self, host: str) -> bool:
+        return self.host_pages[host] >= PER_HOST_CAP
+
+    def note_saved(self, host: str) -> None:
+        self.saved += 1
+        self.host_pages[host] += 1
+
+    def is_trap_link(self, url: str) -> bool:
+        """Track numeric-variant volume per host; flag/skip pagination traps."""
+        host = _host(url)
+        template = _numeric_template(url)
+        counts = self.host_templates.setdefault(host, Counter())
+        counts[template] += 1
+        if counts[template] > TRAP_NUMERIC_THRESHOLD:
+            if host not in self.trapped_hosts:
+                self.trapped_hosts.add(host)
+                logger.warning(
+                    "[TRAP] %s: >%d numeric variants of %s — de-prioritizing",
+                    host, TRAP_NUMERIC_THRESHOLD, template,
+                )
+            return True
+        return False
+
 
 MAX_RETRIES = 3
 
@@ -175,19 +254,39 @@ async def worker(
     visited: Set[str],
     semaphore: asyncio.Semaphore,
     client: httpx.AsyncClient,
-    stats: dict,
+    state: RunState,
 ) -> None:
     while True:
         try:
-            url = await asyncio.wait_for(queue.get(), timeout=QUEUE_IDLE_TIMEOUT)
+            url, depth = await asyncio.wait_for(queue.get(), timeout=QUEUE_IDLE_TIMEOUT)
         except asyncio.TimeoutError:
             logger.info("Worker idle for %ds, exiting", QUEUE_IDLE_TIMEOUT)
             return
 
         try:
+            # Global run ceiling: stop doing work once we've saved enough. We keep
+            # draining the queue (cheaply) so task_done balances and gather ends.
+            if state.run_ceiling_reached():
+                continue
+
             if url in visited:
                 continue
             visited.add(url)
+
+            host = _host(url)
+
+            # Per-host fairness cap: once a host hits PER_HOST_CAP we stop
+            # crawling it entirely for the rest of the run.
+            if state.host_capped(host):
+                if host not in state.capped_hosts:
+                    state.capped_hosts.add(host)
+                    logger.info("[HOST CAP] %s reached %d", host, PER_HOST_CAP)
+                continue
+
+            # Negative cache: skip onions known-dead and still within cooldown.
+            if is_dead(url):
+                logger.debug("Skip dead-cached onion: %s", url)
+                continue
 
             if not should_recrawl(url):
                 logger.debug("Skip fresh URL: %s", url)
@@ -195,15 +294,19 @@ async def worker(
 
             async with semaphore:
                 await _domain_throttle(url)
-                logger.info("Crawling %s", url)
+                logger.info("Crawling %s (depth %d)", url, depth)
                 html, outcome = await fetch(client, url)
 
                 if html is None:
-                    # Only connection-level failures count toward dead-marking;
-                    # HTTP 403/429/503 and other errors are skipped silently.
+                    # Connection-level failures count toward dead-marking AND the
+                    # negative cache; HTTP 403/429/503 are transient -> skip only.
                     if outcome == FETCH_DEAD:
                         mark_dead(url)
+                        record_dead(url)
                     continue
+
+                # Reachable again: drop any stale dead-cache entry.
+                clear_dead(url)
 
                 parsed = parse_page(html, url)
 
@@ -223,13 +326,25 @@ async def worker(
                     score=0.0,
                     content_hash=content_hash,
                     page_type=parsed.get("page_type", "other"),
+                    enrichment_method=meta.get("enrichment_method", "heuristic"),
                 )
-                stats["saved"] += 1
+                state.note_saved(host)
                 logger.info("Saved: [%s] %s", meta["category"], meta["title"][:80])
 
-                for link in parsed["links"]:
-                    if link not in visited:
-                        await queue.put(link)
+                # Enqueue children unless we're at the depth limit. Depth caps
+                # how far we wander from a seed and starves pagination traps.
+                if depth < MAX_DEPTH and not state.run_ceiling_reached():
+                    for link in parsed["links"]:
+                        if link in visited:
+                            continue
+                        link_host = _host(link)
+                        if state.host_capped(link_host):
+                            continue
+                        # Drop numeric-pagination links from trap-flagged hosts;
+                        # is_trap_link also updates the per-host variant counter.
+                        if state.is_trap_link(link):
+                            continue
+                        await queue.put((link, depth + 1))
 
                 await asyncio.sleep(CRAWLER_DELAY)
         except Exception:
@@ -258,6 +373,10 @@ def _build_seed_set(weekly: bool) -> Set[str]:
     # Always give long-dead sites a fresh chance at the top of a cycle.
     urls.update(revive_check())
 
+    # Negative-cache revivals: onions past their dead-cache cooldown get one
+    # retry. is_dead() returns False for them, so the worker won't re-skip them.
+    urls.update(revive_candidates())
+
     # Daily: stale live sites. Weekly: everything, including currently-dead.
     urls.update(get_crawl_urls(include_dead=weekly))
     return urls
@@ -269,7 +388,7 @@ async def crawl_cycle(weekly: bool = False) -> None:
     # Fresh per-cycle visited set so each scheduled run re-crawls from scratch
     # (freshness is still gated by should_recrawl()).
     visited: Set[str] = set()
-    stats = {"saved": 0}
+    state = RunState()
     started = time.monotonic()
 
     seeds = _build_seed_set(weekly)
@@ -279,7 +398,8 @@ async def crawl_cycle(weekly: bool = False) -> None:
         len(seeds),
     )
     for url in seeds:
-        await queue.put(url)
+        # Seeds start at depth 0.
+        await queue.put((url, 0))
 
     transport = httpx.AsyncHTTPTransport(proxy=TOR_PROXY)
     async with httpx.AsyncClient(transport=transport) as client:
@@ -289,22 +409,27 @@ async def crawl_cycle(weekly: bool = False) -> None:
             return
 
         tasks = [
-            asyncio.create_task(worker(queue, visited, semaphore, client, stats))
+            asyncio.create_task(worker(queue, visited, semaphore, client, state))
             for _ in range(CRAWLER_WORKERS)
         ]
         await asyncio.gather(*tasks)
 
     elapsed = max(time.monotonic() - started, 0.001)
-    pages_per_hour = stats["saved"] / elapsed * 3600
+    pages_per_hour = state.saved / elapsed * 3600
     logger.info(
-        "Crawl cycle done. Visited %d URLs, saved %d pages in %.0fs (%.1f pages/hour).",
+        "Crawl cycle done. Visited %d URLs, saved %d pages in %.0fs (%.1f pages/hour). "
+        "Hosts capped: %d, traps flagged: %d.",
         len(visited),
-        stats["saved"],
+        state.saved,
         elapsed,
         pages_per_hour,
+        len(state.capped_hosts),
+        len(state.trapped_hosts),
     )
+    if state.run_ceiling_reached():
+        logger.warning("Run ceiling hit: stopped at %d pages", MAX_PAGES_PER_RUN)
     try:
-        record_crawl_stats(stats["saved"], pages_per_hour, elapsed)
+        record_crawl_stats(state.saved, pages_per_hour, elapsed)
     except Exception:
         logger.exception("Failed to record crawl stats")
 

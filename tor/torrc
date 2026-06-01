@@ -3,3 +3,5 @@ RunAsDaemon 0
 Log notice stderr
 HiddenServiceDir /tmp/hidden_service/
 HiddenServicePort 80 nginx:80
+SocksTimeout 30
+CircuitStreamTimeout 30

@@ -1,4 +1,5 @@
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from typing import List
 
@@ -50,46 +51,69 @@ def upsert_page(
     score: float = 0.0,
     content_hash: str | None = None,
     page_type: str = "other",
+    enrichment_method: str = "heuristic",
 ) -> None:
     with get_db() as conn:
-        # Skip pages whose content_hash already exists under a different URL, so
-        # the same content isn't indexed multiple times (e.g. mirror domains).
+        # Dedup invariant: the same content_hash must exist under exactly one URL.
+        # If this content already lives under a *different* URL, treat the new
+        # sighting as a re-sighting of that row — bump last_seen, do not insert a
+        # second copy. (The DB also enforces this via the UNIQUE index once
+        # scripts/dedupe.py has run; this app-level path keeps the invariant on a
+        # not-yet-deduped DB and avoids relying on ON CONFLICT(content_hash)
+        # erroring when the index is absent.)
         if content_hash:
             dup = conn.execute(
                 "SELECT url FROM pages WHERE content_hash = ? AND url != ? LIMIT 1",
                 (content_hash, url),
             ).fetchone()
             if dup is not None:
+                conn.execute(
+                    "UPDATE pages SET last_seen = CURRENT_TIMESTAMP WHERE url = ?",
+                    (dup["url"],),
+                )
+                conn.commit()
                 logger.debug(
-                    "Skipping duplicate content_hash %s (already at %s)",
-                    content_hash,
-                    dup["url"],
+                    "Duplicate content_hash %s: bumped last_seen on %s (skipped %s)",
+                    content_hash, dup["url"], url,
                 )
                 return
-        conn.execute(
-            """
-            INSERT INTO pages (url, title, description, category, lang, score, is_alive, last_seen, content_hash, page_type)
-            VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, ?, ?)
-            ON CONFLICT(url) DO UPDATE SET
-                title        = excluded.title,
-                description  = excluded.description,
-                category     = excluded.category,
-                lang         = excluded.lang,
-                score        = excluded.score,
-                is_alive     = 1,
-                fail_count   = 0,
-                content_hash = excluded.content_hash,
-                page_type    = excluded.page_type,
-                last_seen    = CASE
-                    WHEN excluded.content_hash IS NOT NULL
-                         AND excluded.content_hash != COALESCE(pages.content_hash, '')
-                    THEN CURRENT_TIMESTAMP
-                    ELSE pages.last_seen
-                    END
-            """,
-            (url, title, description, category, lang, score, content_hash, page_type),
-        )
-        conn.commit()
+        try:
+            conn.execute(
+                """
+                INSERT INTO pages (url, title, description, category, lang, score, is_alive, last_seen, content_hash, page_type, enrichment_method)
+                VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, ?, ?, ?)
+                ON CONFLICT(url) DO UPDATE SET
+                    title             = excluded.title,
+                    description       = excluded.description,
+                    category          = excluded.category,
+                    lang              = excluded.lang,
+                    score             = excluded.score,
+                    is_alive          = 1,
+                    fail_count        = 0,
+                    content_hash      = excluded.content_hash,
+                    page_type         = excluded.page_type,
+                    enrichment_method = excluded.enrichment_method,
+                    last_seen    = CASE
+                        WHEN excluded.content_hash IS NOT NULL
+                             AND excluded.content_hash != COALESCE(pages.content_hash, '')
+                        THEN CURRENT_TIMESTAMP
+                        ELSE pages.last_seen
+                        END
+                """,
+                (url, title, description, category, lang, score, content_hash, page_type, enrichment_method),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            # Lost a race to another writer inserting the same content_hash under
+            # a different URL (DB-level UNIQUE index caught it). Re-sight instead.
+            if content_hash:
+                conn.execute(
+                    "UPDATE pages SET last_seen = CURRENT_TIMESTAMP WHERE content_hash = ?",
+                    (content_hash,),
+                )
+                conn.commit()
+            else:
+                raise
 
 
 def mark_dead(url: str) -> None:

@@ -1,8 +1,11 @@
+import logging
 import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator, Optional
+
+logger = logging.getLogger(__name__)
 
 DATABASE_PATH = os.environ.get("DATABASE_PATH", "/app/db/darkseek.db")
 
@@ -58,6 +61,31 @@ def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     return any(r["name"] == column for r in rows)
 
 
+def ensure_content_hash_unique_index(conn: sqlite3.Connection) -> bool:
+    """Create the partial UNIQUE index on content_hash if the data allows it.
+
+    The index is the DB-level guarantee behind content dedup. It cannot exist
+    while duplicate content_hash values are present, so this is best-effort:
+    returns True if the index exists afterwards, False if duplicates still block
+    it (operator must run scripts/dedupe.py first). NULL hashes are excluded so
+    user-submitted / hash-less rows never collide. Idempotent.
+    """
+    try:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pages_content_hash_unique "
+            "ON pages(content_hash) WHERE content_hash IS NOT NULL"
+        )
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        # Duplicates present — expected on the legacy DB until dedupe runs.
+        logger.warning(
+            "content_hash UNIQUE index not created: duplicates present. "
+            "Run scripts/dedupe.py to collapse them, then re-run migrate()."
+        )
+        return False
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     """Idempotent, non-destructive schema migrations.
 
@@ -72,6 +100,19 @@ def migrate(conn: sqlite3.Connection) -> None:
     # Consecutive fetch-failure counter for dead-site retry logic.
     if not _column_exists(conn, "pages", "fail_count"):
         conn.execute("ALTER TABLE pages ADD COLUMN fail_count INTEGER DEFAULT 0")
+    # Why a row holds its current category/lang (ai|heuristic|pending).
+    if not _column_exists(conn, "pages", "enrichment_method"):
+        conn.execute(
+            "ALTER TABLE pages ADD COLUMN enrichment_method TEXT DEFAULT 'pending'"
+        )
+        # Best-effort backfill of historical state, in one set-based UPDATE
+        # (no row loads): fully-populated legacy rows were AI-enriched before the
+        # outage; rows missing category/lang stay 'pending' for the backfill job.
+        conn.execute(
+            "UPDATE pages SET enrichment_method = 'ai' "
+            "WHERE enrichment_method = 'pending' "
+            "AND category IS NOT NULL AND lang IS NOT NULL"
+        )
 
     # Single-row table holding the latest crawler cycle metrics for /metrics.
     conn.execute(
@@ -86,11 +127,29 @@ def migrate(conn: sqlite3.Connection) -> None:
         """
     )
 
+    # Negative cache for dead .onion services (see crawler/dead_cache.py).
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dead_onions (
+            url             TEXT PRIMARY KEY,
+            first_failed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_failed_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            fail_count      INTEGER DEFAULT 1
+        )
+        """
+    )
+
     # Indexes for the hot search/order-by paths. Idempotent.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_last_seen ON pages(last_seen DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_category ON pages(category)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_is_alive ON pages(is_alive)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pages_enrichment_method ON pages(enrichment_method)"
+    )
     conn.commit()
+
+    # Best-effort: becomes a no-op once dedupe.py has collapsed duplicates.
+    ensure_content_hash_unique_index(conn)
 
 
 def init_db() -> None:
