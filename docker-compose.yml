@@ -4,7 +4,12 @@ services:
     image: osminogin/tor-simple
     user: "root"
     restart: unless-stopped
-    mem_limit: 120m
+    # Tor sat at ~105/120MiB (87%, OOM-imminent). Raise the ceiling to 180m and
+    # give it a soft floor so the scheduler doesn't reclaim its pages under
+    # crawler memory pressure. Envelope: tor 180 + api 180 + nginx 32 +
+    # crawler 256 = 648m of 1024m, leaving 376m for the OS + page cache.
+    mem_limit: 180m
+    mem_reservation: 150m
     volumes:
       - ./tor/torrc:/etc/tor/torrc:ro
       - /opt/onion_hidden_keys:/tmp/hidden_service
@@ -49,7 +54,11 @@ services:
       - CRAWLER_WORKERS=5
       - CRAWLER_DELAY=1.5
       - CYCLE_SLEEP=30
-    mem_limit: 300m
+    # 256m to fund tor's headroom within the 1GB budget. Peak crawler RSS stays
+    # under this: bounded queue/visited set (10k-page run ceiling), streaming
+    # enrichment, no full-table loads. Envelope: tor 180 + api 180 + nginx 32 +
+    # crawler 256 = 648m of 1024m. See self-review.
+    mem_limit: 256m
     volumes:
       - /opt/darkseek_db:/app/db
     depends_on:

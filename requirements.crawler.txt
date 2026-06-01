@@ -3,3 +3,6 @@ beautifulsoup4==4.12.3
 lxml==5.3.0
 anthropic==0.40.0
 python-dotenv==1.0.1
+# Local, offline language detection for the heuristic enricher fallback.
+# Pure-Python, ~1MB, no native deps — cheap against the crawler RAM budget.
+langdetect==1.0.9

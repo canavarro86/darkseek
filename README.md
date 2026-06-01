@@ -83,6 +83,44 @@ DarkSeek is a full-text search engine for the Tor network. It crawls `.onion` si
 
 ---
 
+## Release v1.2.0 — Hardening & Resilience
+
+Unattended-operation hardening after the corpus reached ~39.5k pages. Each
+external dependency can now fail without halting or corrupting ingestion.
+
+### AI enrichment — graceful degradation
+- Two strategies behind one interface: `AIEnricher` (Claude) and
+  `HeuristicEnricher` (local, zero-network).
+- **Circuit breaker:** after 5 consecutive API failures (credit exhaustion / 429
+  / 5xx / timeout) the API is skipped for 15 min and every page is enriched
+  locally; one probe re-closes the circuit on recovery.
+- New `enrichment_method` column (`ai` | `heuristic` | `pending`) replaces
+  NULL-as-state and drives the backfill job. Ingestion never writes NULL
+  `category`/`lang` again.
+- Single `normalize_lang()` source of truth (ISO-639-1, lowercase) used by both
+  enrichers and the migration script.
+
+### Crawler resilience
+- **Per-host fairness cap:** 200 pages/host/run (BBC had reached 1,603).
+- **Crawl-trap protection:** depth limit 5, global ceiling 10,000 pages/run, and
+  a numeric-pagination trap detector that de-prioritizes runaway hosts.
+- **Dead-onion negative cache** (`dead_onions` table): resolve failures are
+  cached with exponential back-off (7→14→28… days, capped 90), saving ~30s per
+  dead onion per cycle. Revived and cleared on recovery.
+
+### Data hygiene
+- Content dedup enforced by a partial `UNIQUE` index on `content_hash` plus an
+  app-level upsert that bumps `last_seen` instead of inserting a copy.
+- One-shot scripts: `scripts/dedupe.py` (collapse 1,215 historical dupes),
+  `scripts/normalize_lang.py` (canonicalize lang tags), `scripts/reprocess_ai.py`
+  (upgrade `heuristic` rows to `ai` when credits return — resumable, rate-limited).
+
+### Memory envelope
+- tor `mem_limit` 120m→180m (+`mem_reservation` 150m); crawler 256m.
+  tor 180 + api 180 + nginx 32 + crawler 256 = **648m / 1024m**.
+
+---
+
 ## Instant Answer Commands
 
 Type directly in the search box:
