@@ -124,7 +124,9 @@
       <div class="coin-addr" id="addr-${i}">${escHtml(c.addr)}</div>
       <div class="coin-actions">
         <button class="coin-btn" data-act="copy" data-i="${i}">Copy</button>
+        <button class="coin-btn" data-act="qr" data-i="${i}">Show QR</button>
       </div>
+      <div class="coin-qr" id="qr-${i}" hidden></div>
     `;
     container.appendChild(card);
   });
@@ -134,7 +136,54 @@
     if (!btn) return;
     const i = +btn.dataset.i;
     if (btn.dataset.act === 'copy') copyAddr(i, btn);
+    else if (btn.dataset.act === 'qr') toggleQR(i, btn);
   });
+
+  // --- on-demand QR via qrcodejs (cdnjs). Library + each code load lazily ---
+  const CDN_QRCODE = 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js';
+  const _qrRendered = {};   // index -> true once its QR has been drawn
+  let _qrLib = null;        // shared lazy-load promise for the qrcodejs script
+
+  function loadQrLib() {
+    if (_qrLib) return _qrLib;
+    _qrLib = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = CDN_QRCODE;
+      s.async = true;
+      s.onload = () => resolve();
+      s.onerror = () => { _qrLib = null; reject(new Error('failed to load QR library')); };
+      document.head.appendChild(s);
+    });
+    return _qrLib;
+  }
+
+  async function toggleQR(i, btn) {
+    const box = document.getElementById('qr-' + i);
+    if (!box.hidden) {                 // currently shown -> hide
+      box.hidden = true;
+      btn.textContent = 'Show QR';
+      return;
+    }
+    box.hidden = false;
+    btn.textContent = 'Hide QR';
+    if (_qrRendered[i]) return;        // render only once, on first reveal
+    box.innerHTML = '<span class="coin-qr-msg">generating…</span>';
+    try {
+      await loadQrLib();
+      box.innerHTML = '';
+      new QRCode(box, {
+        text: COINS[i].addr,
+        width: 300,
+        height: 300,
+        colorDark: '#00ff41',
+        colorLight: '#0a0a0a',
+        correctLevel: QRCode.CorrectLevel.L,
+      });
+      _qrRendered[i] = true;
+    } catch (e) {
+      box.innerHTML = '<span class="coin-qr-msg">could not load QR library</span>';
+    }
+  }
 
   async function copyAddr(i, btn) {
     const addr = COINS[i].addr;
