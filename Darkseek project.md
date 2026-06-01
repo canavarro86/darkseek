@@ -82,6 +82,13 @@
 - [x] nginx: CSP обновлён — разрешён cdnjs.cloudflare.com для qrcodejs/spark-md5 ✅
 - [x] БД: ~39.5k страниц (выросла с 1165 за ночь краулинга) ✅
 
+### ✅ Release v1.3 — Search Quality
+- [x] Query parser: "phrase", AND/OR, -exclude, injection protection
+- [x] Stemmer: Snowball en/ru query-time (searching=search, магазины=магазин)
+- [x] Synonym dictionary: ~50 darknet bilingual groups (btc=bitcoin=криптовалюта)
+- [x] Composite scoring: BM25*0.6 + freshness*0.4 * alive_boost (фикс always-0 бага)
+- [x] Frontend: подсветка совпадений в результатах (<mark> тег)
+
 ### ✅ Frontend
 - [x] Donate страница: 6 кошельков (BTC/ETH/USDT/LTC/DOGE/SOL), QR коды, COPY кнопки ✅
 - [x] FAQ/Commands страница: таблица команд, кликабельные строки ✅
@@ -124,3 +131,4 @@
 - [ ] Переезд на сервер 4GB RAM (Hetzner CX22, €4/mo)
 - [ ] Публичный API для разработчиков
 - [ ] Репутация: Reddit r/onions, форумы даркнета
+

@@ -139,6 +139,28 @@ def migrate(conn: sqlite3.Connection) -> None:
         """
     )
 
+    # User-submitted crawl queue (see db/migrations/002_crawl_queue.sql). The API
+    # writes 'pending' rows from /api/submit/bulk; the crawler claims them at the
+    # top of each cycle. Kept here too so a fresh DB converges without a separate
+    # migration runner.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS crawl_queue (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            url        TEXT UNIQUE NOT NULL,
+            added_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            priority   INTEGER DEFAULT 0,
+            status     TEXT DEFAULT 'pending'
+                       CHECK(status IN ('pending','processing','done','failed')),
+            source     TEXT DEFAULT 'user'
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_queue_status "
+        "ON crawl_queue(status, priority DESC, added_at)"
+    )
+
     # Indexes for the hot search/order-by paths. Idempotent.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_last_seen ON pages(last_seen DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_category ON pages(category)")

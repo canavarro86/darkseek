@@ -214,6 +214,118 @@ def submit():
     })
 
 
+@app.get("/api/lookup")
+def lookup():
+    """Look up a single .onion URL in the live index for the Check & Submit UI.
+
+    Returns the indexed card if the URL already exists in `pages`, else
+    {"found": false}. Validation is intentionally looser than /api/submit:
+    any input containing ".onion" is accepted (so the UI can probe whatever a
+    user typed); anything else is a 400. This is a read, so — like /api/search
+    and the other GET endpoints — it is not behind the submission rate limiter
+    (nginx still rate-limits /api/ at the edge).
+    """
+    url = (request.args.get("url") or "").strip()
+    if ".onion" not in url:
+        return jsonify({"error": "url must be a .onion address"}), 400
+
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT url, title, description, category, lang, last_seen, "
+            "is_alive, indexed_at FROM pages WHERE url = ?",
+            (url,),
+        ).fetchone()
+
+    if row is None:
+        return jsonify({"found": False, "url": url})
+
+    return jsonify({
+        "found": True,
+        "url": row["url"],
+        "title": row["title"],
+        "description": row["description"],
+        "category": row["category"],
+        "lang": row["lang"],
+        "last_seen": row["last_seen"],
+        "is_alive": row["is_alive"],
+        "indexed_at": row["indexed_at"],
+    })
+
+
+# Max URLs accepted in a single bulk submission.
+MAX_BULK_URLS = 50
+
+
+@app.post("/api/submit/bulk")
+def submit_bulk():
+    """Check a batch of .onion URLs and queue the unknown ones for crawling.
+
+    Per URL the result status is one of:
+      already_indexed — URL is already in `pages` (title included)
+      already_queued  — URL is already a pending/processing crawl_queue row
+      queued          — newly inserted into crawl_queue for the crawler
+      invalid         — input does not contain ".onion"
+
+    Rate-limited with the same per-IP limiter as /api/submit (one bulk request =
+    one submission), since this is the write path that fills the crawl queue.
+    """
+    data = request.get_json(silent=True) or {}
+    urls = data.get("urls")
+    if not isinstance(urls, list) or not urls:
+        return jsonify({"error": 'body must be {"urls": [...]}'}), 400
+    if len(urls) > MAX_BULK_URLS:
+        return jsonify({"error": f"max {MAX_BULK_URLS} urls per request"}), 400
+
+    ip = _client_ip()
+    if not _submit_allowed(ip):
+        return jsonify({
+            "status": "error",
+            "message": "Rate limit exceeded — max 5 submissions per hour.",
+        }), 429
+
+    results = []
+    with get_db() as conn:
+        for raw in urls:
+            url = raw.strip() if isinstance(raw, str) else ""
+            if ".onion" not in url:
+                # Echo the original input back so the UI can show what failed.
+                results.append({"url": raw, "status": "invalid"})
+                continue
+
+            page = conn.execute(
+                "SELECT title FROM pages WHERE url = ?", (url,)
+            ).fetchone()
+            if page is not None:
+                results.append({
+                    "url": url,
+                    "status": "already_indexed",
+                    "title": page["title"],
+                })
+                continue
+
+            # Uncommitted inserts earlier in this loop are visible to these reads
+            # (same connection), so duplicates within one request resolve to
+            # 'already_queued' after the first 'queued'.
+            queued = conn.execute(
+                "SELECT 1 FROM crawl_queue WHERE url = ?", (url,)
+            ).fetchone()
+            if queued is not None:
+                results.append({"url": url, "status": "already_queued"})
+                continue
+
+            # New URL: queue it. OR IGNORE guards against a concurrent request
+            # racing in the same URL between our SELECT and INSERT.
+            conn.execute(
+                "INSERT OR IGNORE INTO crawl_queue (url, source) VALUES (?, 'user')",
+                (url,),
+            )
+            results.append({"url": url, "status": "queued"})
+        conn.commit()
+
+    logger.info("bulk submit ip=%s urls=%d", ip, len(urls))
+    return jsonify({"results": results})
+
+
 @app.get("/api/ip")
 def api_ip():
     """Return the caller's Tor exit-node IP for the `ip` instant command.

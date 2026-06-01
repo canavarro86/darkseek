@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DarkSeek — Submit Onion</title>
+  <title>DarkSeek — Check & Submit</title>
   <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -118,10 +118,12 @@
       margin-bottom: 2.5rem;
     }
 
+    /* ---- shared form chrome ---- */
+    .form-wrap { width: 100%; max-width: 560px; }
+
     .submit-form {
       display: flex;
       width: 100%;
-      max-width: 520px;
       margin-bottom: 0.75rem;
     }
     #submit-url {
@@ -147,7 +149,7 @@
     }
     #submit-url::placeholder { color: rgba(0,255,65,0.25); }
 
-    #submit-btn {
+    .btn {
       background: rgba(0,255,65,0.12);
       border: 1px solid rgba(0,255,65,0.30);
       color: #00ff41;
@@ -160,8 +162,8 @@
       transition: background 0.15s;
       white-space: nowrap;
     }
-    #submit-btn:hover    { background: rgba(0,255,65,0.25); }
-    #submit-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn:hover    { background: rgba(0,255,65,0.25); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
     .feedback {
       font-size: 11px;
@@ -172,8 +174,102 @@
       color: rgba(0,255,65,0.35);
     }
     .feedback.ok     { color: rgba(0,255,65,0.85); }
-    .feedback.err    { color: rgba(255,50,50,0.6); }
+    .feedback.err    { color: rgba(255,80,80,0.7); }
     .feedback.exists { color: rgba(0,255,65,0.50); }
+
+    /* ---- OR separator ---- */
+    .sep {
+      display: flex;
+      align-items: center;
+      width: 100%;
+      margin: 1.5rem 0;
+      color: rgba(0,255,65,0.30);
+      font-size: 10px;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+    }
+    .sep::before, .sep::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: rgba(0,255,65,0.15);
+    }
+    .sep span { padding: 0 0.9rem; }
+
+    /* ---- bulk ---- */
+    .bulk-form { display: flex; flex-direction: column; width: 100%; gap: 0.6rem; }
+    #bulk-urls {
+      background: rgba(0,255,65,0.03);
+      border: 1px solid rgba(0,255,65,0.30);
+      color: #c0ffd0;
+      font-family: inherit;
+      font-size: 0.9rem;
+      line-height: 1.5;
+      min-height: 120px;
+      padding: 0.75rem 1rem;
+      resize: vertical;
+      outline: none;
+      box-shadow: inset 0 0 20px rgba(0,255,65,0.02);
+      transition: border-color 0.2s;
+    }
+    #bulk-urls:focus { border-color: rgba(0,255,65,0.60); }
+    #bulk-urls::placeholder { color: rgba(0,255,65,0.25); }
+    .bulk-hint {
+      font-size: 10px;
+      letter-spacing: 1px;
+      color: rgba(0,255,65,0.30);
+      text-align: right;
+    }
+
+    /* ---- result cards ---- */
+    #results {
+      width: 100%;
+      max-width: 560px;
+      margin-top: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+    }
+    .card {
+      border: 1px solid rgba(0,255,65,0.20);
+      border-left-width: 3px;
+      background: rgba(0,255,65,0.025);
+      padding: 0.7rem 0.9rem;
+      font-size: 12px;
+      letter-spacing: 0.5px;
+      line-height: 1.55;
+      word-break: break-all;
+      animation: fadein 0.25s ease-out;
+    }
+    @keyframes fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    .card .status {
+      font-size: 11px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      display: block;
+      margin-bottom: 0.25rem;
+    }
+    .card .title { color: #d8ffe4; font-size: 13px; }
+    .card .desc  { color: rgba(0,255,65,0.55); }
+    .card .url   { color: rgba(0,255,65,0.40); font-size: 11px; }
+    .card .note  { color: rgba(0,255,65,0.40); font-size: 11px; }
+    .card .cat {
+      border: 1px solid rgba(0,255,65,0.35);
+      border-radius: 2px;
+      padding: 0 5px;
+      font-size: 10px;
+      letter-spacing: 1px;
+    }
+
+    .card-found   { border-left-color: #00ff41; }
+    .card-found .status   { color: #00ff41; }
+    .card-queued  { border-left-color: rgba(0,255,65,0.55); }
+    .card-queued .status  { color: rgba(0,255,65,0.65); }
+    .card-already { border-left-color: rgba(0,200,80,0.4); }
+    .card-already .status { color: rgba(0,255,65,0.45); }
+    .card-invalid { border-left-color: rgba(255,80,80,0.7); background: rgba(255,80,80,0.04); }
+    .card-invalid .status { color: rgba(255,80,80,0.75); }
+    .card-invalid .url    { color: rgba(255,120,120,0.6); }
 
     .back-link {
       font-size: 10px;
@@ -183,7 +279,7 @@
       text-transform: uppercase;
       border-bottom: 1px solid rgba(0,255,65,0.15);
       padding-bottom: 1px;
-      margin-top: 0.5rem;
+      margin-top: 2rem;
       transition: color 0.15s, border-bottom-color 0.15s;
     }
     .back-link:hover {
@@ -195,7 +291,7 @@
       color: rgba(0,255,65,0.20);
       font-size: 11px;
       letter-spacing: 1.5px;
-      margin-top: 3rem;
+      margin-top: 2.5rem;
       margin-bottom: 2rem;
       text-align: center;
       max-width: 480px;
@@ -223,7 +319,8 @@
       .subtitle     { font-size: 14px; letter-spacing: 2px; }
       .submit-form  { flex-direction: column; gap: 0.5rem; }
       #submit-url   { border-right: 1px solid rgba(0,255,65,0.30); font-size: 16px; min-height: 44px; width: 100%; }
-      #submit-btn   { font-size: 14px; min-height: 44px; width: 100%; padding: 0.75rem 1rem; }
+      .btn          { font-size: 14px; min-height: 44px; width: 100%; padding: 0.75rem 1rem; }
+      #bulk-urls    { font-size: 16px; }
       .feedback     { font-size: 14px; }
       .back-link    { font-size: 14px; }
       .quote        { font-size: 14px; }
@@ -296,20 +393,34 @@
 <div class="fog"></div>
 
 <div class="page">
-  <div class="eyebrow"><span class="dot"></span>submit to index</div>
+  <div class="eyebrow"><span class="dot"></span>check &amp; submit</div>
 
   <h1 class="logo"><span class="logo-dark">DARK</span><span class="logo-seek">SEEK</span></h1>
 
-  <p class="subtitle">add your onion service</p>
+  <p class="subtitle">check the index &middot; add new onions</p>
 
-  <form class="submit-form" id="submit-form" onsubmit="submitSite(); return false;">
-    <input id="submit-url" type="text" placeholder="http://abc...xyz.onion/" autocomplete="off" spellcheck="false" />
-    <button type="submit" id="submit-btn">Submit</button>
-  </form>
+  <div class="form-wrap">
+    <!-- Single URL: lookup first, queue if unknown -->
+    <form class="submit-form" id="single-form" onsubmit="checkSingle(); return false;">
+      <input id="submit-url" type="text" placeholder="http://abc...xyz.onion/" autocomplete="off" spellcheck="false" />
+      <button type="submit" id="single-btn" class="btn">Check / Add</button>
+    </form>
 
-  <div id="feedback" class="feedback"></div>
+    <div id="feedback" class="feedback"></div>
 
-  <a href="/" class="back-link">← back to search</a>
+    <div class="sep"><span>or check many</span></div>
+
+    <!-- Bulk: one URL per line, up to 50 -->
+    <form class="bulk-form" id="bulk-form" onsubmit="checkBulk(); return false;">
+      <textarea id="bulk-urls" placeholder="http://aaa...onion&#10;http://bbb...onion&#10;http://ccc...onion" spellcheck="false"></textarea>
+      <div class="bulk-hint">one URL per line &middot; max 50</div>
+      <button type="submit" id="bulk-btn" class="btn">Check All</button>
+    </form>
+  </div>
+
+  <div id="results"></div>
+
+  <a href="/" class="back-link">&larr; back to search</a>
 
   <p class="quote">"information wants to be free" — Stewart Brand, 1984</p>
 </div>
@@ -317,44 +428,200 @@
 <footer class="footer-onion">37mj2uc7...onion</footer>
 
 <script>
-  const ONION_RE = /^https?:\/\/[a-z2-7]{56}\.onion(\/.*)?$/;
+  // Loose check matching the backend /api/lookup rule: any ".onion" present.
+  const ONION_HINT = '.onion';
+  const MAX_BULK = 50;
+
+  const $ = (id) => document.getElementById(id);
 
   function setFeedback(msg, cls) {
-    const el = document.getElementById('feedback');
+    const el = $('feedback');
     el.textContent = msg;
     el.className = 'feedback' + (cls ? ' ' + cls : '');
   }
 
-  async function submitSite() {
-    const input = document.getElementById('submit-url');
-    const url   = input.value.trim();
-    const btn   = document.getElementById('submit-btn');
+  // ---- ASCII [....] spinner ---------------------------------------------
+  let _spinTimer = null;
+  function startSpinner(el, label) {
+    const frames = ['[    ]', '[.   ]', '[..  ]', '[... ]', '[....]'];
+    let i = 0;
+    stopSpinner();
+    const tick = () => { el.textContent = (label ? label + ' ' : '') + frames[i++ % frames.length]; };
+    tick();
+    _spinTimer = setInterval(tick, 200);
+  }
+  function stopSpinner() {
+    if (_spinTimer) { clearInterval(_spinTimer); _spinTimer = null; }
+  }
 
-    if (!ONION_RE.test(url)) {
-      setFeedback('✗ Must be a valid v3 .onion URL (56-char host).', 'err');
+  // ---- helpers -----------------------------------------------------------
+  function daysAgo(ts) {
+    if (!ts) return 'unknown';
+    // SQLite CURRENT_TIMESTAMP is "YYYY-MM-DD HH:MM:SS" in UTC.
+    const iso = ts.includes('T') ? ts : ts.replace(' ', 'T') + 'Z';
+    const then = new Date(iso);
+    if (isNaN(then)) return 'unknown';
+    const days = Math.floor((Date.now() - then.getTime()) / 86400000);
+    if (days <= 0) return 'today';
+    if (days === 1) return '1 day ago';
+    return days + ' days ago';
+  }
+
+  function el(tag, cls, text) {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+
+  function clearResults() { $('results').innerHTML = ''; }
+
+  function renderFound(data) {
+    const card = el('div', 'card card-found');
+    const status = el('div', 'status');
+    status.appendChild(document.createTextNode('✓ INDEXED '));
+    if (data.category) status.appendChild(el('span', 'cat', data.category));
+    status.appendChild(document.createTextNode('  · last seen: ' + daysAgo(data.last_seen)));
+    card.appendChild(status);
+    if (data.title) card.appendChild(el('div', 'title', data.title));
+    if (data.description) card.appendChild(el('div', 'desc', data.description));
+    card.appendChild(el('div', 'url', data.url));
+    return card;
+  }
+
+  function renderQueued(url) {
+    const card = el('div', 'card card-queued');
+    card.appendChild(el('div', 'status', '⏳ QUEUED FOR INDEXING'));
+    card.appendChild(el('div', 'url', url));
+    card.appendChild(el('div', 'note', 'Will be crawled within 24 hours.'));
+    return card;
+  }
+
+  function renderAlready(url) {
+    const card = el('div', 'card card-already');
+    card.appendChild(el('div', 'status', '⏳ ALREADY IN QUEUE'));
+    card.appendChild(el('div', 'url', url));
+    return card;
+  }
+
+  function renderInvalid(input) {
+    const card = el('div', 'card card-invalid');
+    card.appendChild(el('div', 'status', '✗ NOT A VALID .ONION URL'));
+    card.appendChild(el('div', 'url', input || '(empty)'));
+    return card;
+  }
+
+  // Render one /api/submit/bulk result object into a card.
+  function renderBulkResult(r) {
+    if (r.status === 'already_indexed') {
+      return renderFound({ url: r.url, title: r.title, category: r.category, last_seen: r.last_seen, description: r.description });
+    }
+    if (r.status === 'queued')          return renderQueued(r.url);
+    if (r.status === 'already_queued')  return renderAlready(r.url);
+    return renderInvalid(r.url);
+  }
+
+  // ---- single URL: lookup, then queue if unknown -------------------------
+  async function checkSingle() {
+    const input = $('submit-url');
+    const url   = input.value.trim();
+    const btn   = $('single-btn');
+
+    if (!url.includes(ONION_HINT)) {
+      setFeedback('✗ That does not look like a .onion URL.', 'err');
       return;
     }
 
+    clearResults();
     btn.disabled = true;
-    setFeedback('Submitting…', '');
+    startSpinner($('feedback'));
 
     try {
-      const res  = await fetch('/api/submit', {
+      const lookup = await fetch('/api/lookup?url=' + encodeURIComponent(url));
+      const found  = await lookup.json().catch(() => ({}));
+
+      if (lookup.ok && found.found) {
+        stopSpinner();
+        setFeedback('✓ Found in index.', 'ok');
+        $('results').appendChild(renderFound(found));
+        return;
+      }
+
+      // Not indexed (or 400) -> try to queue it via the bulk endpoint.
+      const res  = await fetch('/api/submit/bulk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ urls: [url] }),
       });
       const data = await res.json().catch(() => ({}));
+      stopSpinner();
 
-      if (data.status === 'queued') {
-        input.value = '';
-        setFeedback('✓ URL added to crawl queue', 'ok');
-      } else if (data.status === 'exists') {
-        setFeedback('• ' + (data.message || 'Already indexed'), 'exists');
-      } else {
-        setFeedback('✗ ' + (data.message || `HTTP ${res.status}`), 'err');
+      if (res.status === 429) {
+        setFeedback('✗ ' + (data.message || 'Rate limit exceeded.'), 'err');
+        return;
       }
+      const r = (data.results || [])[0];
+      if (!r) {
+        setFeedback('✗ ' + (data.error || `HTTP ${res.status}`), 'err');
+        return;
+      }
+      if (r.status === 'queued') { input.value = ''; setFeedback('✓ Added to crawl queue.', 'ok'); }
+      else if (r.status === 'already_queued') setFeedback('· Already in the crawl queue.', 'exists');
+      else if (r.status === 'invalid')        setFeedback('✗ Not a valid .onion URL.', 'err');
+      else setFeedback('', '');
+      $('results').appendChild(renderBulkResult(r));
     } catch (e) {
+      stopSpinner();
+      setFeedback('✗ Network error — is the API running?', 'err');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // ---- bulk: check/queue many --------------------------------------------
+  async function checkBulk() {
+    const ta  = $('bulk-urls');
+    const btn = $('bulk-btn');
+
+    let urls = ta.value.split('\n').map(s => s.trim()).filter(Boolean);
+    if (urls.length === 0) {
+      setFeedback('✗ Paste at least one URL.', 'err');
+      return;
+    }
+    if (urls.length > MAX_BULK) {
+      setFeedback(`✗ Too many URLs (${urls.length}). Max ${MAX_BULK} per batch.`, 'err');
+      return;
+    }
+    if (!urls.some(u => u.includes(ONION_HINT))) {
+      setFeedback('✗ None of those contain ".onion".', 'err');
+      return;
+    }
+
+    clearResults();
+    btn.disabled = true;
+    startSpinner($('feedback'), 'checking ' + urls.length + ' urls');
+
+    try {
+      const res  = await fetch('/api/submit/bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls }),
+      });
+      const data = await res.json().catch(() => ({}));
+      stopSpinner();
+
+      if (res.status === 429) { setFeedback('✗ ' + (data.message || 'Rate limit exceeded.'), 'err'); return; }
+      if (!data.results) { setFeedback('✗ ' + (data.error || `HTTP ${res.status}`), 'err'); return; }
+
+      const frag = document.createDocumentFragment();
+      const counts = { already_indexed: 0, queued: 0, already_queued: 0, invalid: 0 };
+      data.results.forEach(r => { counts[r.status] = (counts[r.status] || 0) + 1; frag.appendChild(renderBulkResult(r)); });
+      $('results').appendChild(frag);
+      setFeedback(
+        `✓ ${counts.already_indexed} indexed · ${counts.queued} queued · ` +
+        `${counts.already_queued} already queued · ${counts.invalid} invalid`, 'ok');
+    } catch (e) {
+      stopSpinner();
       setFeedback('✗ Network error — is the API running?', 'err');
     } finally {
       btn.disabled = false;
