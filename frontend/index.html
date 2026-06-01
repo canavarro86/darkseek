@@ -300,6 +300,13 @@
     .result-lang  { color: rgba(0,255,65,0.30); font-size: 0.68rem; }
     .result-score { color: rgba(0,255,65,0.25); font-size: 0.68rem; margin-left: auto; }
 
+    /* Matched search terms, highlighted in result titles + descriptions. */
+    mark {
+      background: #003300;
+      color: #00ff41;
+      border-bottom: 1px solid #00ff41;
+    }
+
     .state-msg {
       color: rgba(0,255,65,0.35);
       font-size: 0.85rem;
@@ -748,13 +755,17 @@
 
     const totalPages = Math.ceil(data.total / PAGE_SIZE);
 
+    // Plain terms to highlight, derived from the submitted query (quotes and
+    // operators stripped). The URL line is never highlighted.
+    const terms = extractTerms(data.query || '');
+
     const cards = data.results.map(r => `
       <div class="result">
         <div class="result-title">
-          <a href="${escAttr(r.url)}" target="_blank" rel="noopener noreferrer">${escHtml(r.title || r.url)}</a>
+          <a href="${escAttr(r.url)}" target="_blank" rel="noopener noreferrer">${r.title ? highlight(escHtml(r.title), terms) : escHtml(r.url)}</a>
         </div>
         <div class="result-url">${escHtml(r.url)}</div>
-        <div class="result-desc">${escHtml(r.description || '')}</div>
+        <div class="result-desc">${highlight(escHtml(r.description || ''), terms)}</div>
         <div class="result-dates">
           <span>scanned: ${escHtml(relativeDate(r.last_seen))}</span>
           <span>indexed: ${escHtml(r.indexed_at ? r.indexed_at.slice(0, 10) : '')}</span>
@@ -806,6 +817,39 @@
       .replace(/'/g, '&#39;');
   }
   function escAttr(s) { return escHtml(s); }
+
+  // Pull the plain, highlightable words out of a raw query: strip surrounding
+  // quotes (phrases become their words), drop -excluded terms and the OR
+  // operator. Mirrors the backend parser closely enough for highlighting.
+  function extractTerms(query) {
+    const terms = [];
+    const re = /"([^"]+)"|(\S+)/g;
+    let m;
+    while ((m = re.exec(query)) !== null) {
+      if (m[1] !== undefined) {
+        // Quoted phrase: highlight each word inside it.
+        m[1].split(/\s+/).forEach(w => { if (w) terms.push(w); });
+      } else {
+        const tok = m[2];
+        if (tok.startsWith('-')) continue;        // excluded term
+        if (tok.toUpperCase() === 'OR') continue;  // operator
+        terms.push(tok);
+      }
+    }
+    return terms;
+  }
+
+  // Wrap matches of any term in <mark>. Input is ALREADY html-escaped, so the
+  // only markup we introduce is the <mark> tags themselves. Case-insensitive.
+  function highlight(escapedText, terms) {
+    if (!terms.length || !escapedText) return escapedText;
+    const pat = terms
+      .map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))  // escape regex metachars
+      .filter(Boolean)
+      .join('|');
+    if (!pat) return escapedText;
+    return escapedText.replace(new RegExp('(' + pat + ')', 'gi'), '<mark>$1</mark>');
+  }
 
   /* =====================================================================
      INSTANT ANSWER COMMANDS
