@@ -165,6 +165,70 @@ def revive_check() -> List[str]:
     return urls
 
 
+# Max user-submitted URLs pulled from crawl_queue per cycle. Bounds how much of
+# a cycle's frontier the queue can occupy so seeds/recrawls still get airtime.
+QUEUE_BATCH_LIMIT = 500
+
+
+def claim_queue_batch(limit: int = QUEUE_BATCH_LIMIT) -> List[str]:
+    """Claim a batch of pending crawl_queue URLs for the current crawl cycle.
+
+    Selects the highest-priority, oldest-first pending rows, flips them to
+    'processing' so a concurrent or subsequent cycle won't re-claim them, and
+    returns their URLs to be folded into the crawl frontier. If the cycle aborts
+    before crawling, call requeue_pending() to release the claim.
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT url FROM crawl_queue WHERE status = 'pending' "
+            "ORDER BY priority DESC, added_at ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        urls = [r["url"] for r in rows]
+        if urls:
+            conn.executemany(
+                "UPDATE crawl_queue SET status = 'processing' WHERE url = ?",
+                [(u,) for u in urls],
+            )
+            conn.commit()
+    if urls:
+        logger.info("Claimed %d URLs from crawl_queue", len(urls))
+    return urls
+
+
+def requeue_pending(urls: List[str]) -> None:
+    """Return claimed URLs to 'pending' (cycle aborted before crawling them)."""
+    if not urls:
+        return
+    with get_db() as conn:
+        conn.executemany(
+            "UPDATE crawl_queue SET status = 'pending' WHERE url = ?",
+            [(u,) for u in urls],
+        )
+        conn.commit()
+
+
+def reconcile_queue(urls: List[str]) -> None:
+    """Resolve claimed crawl_queue rows after a cycle finishes.
+
+    A URL now present in `pages` was crawled and indexed successfully -> 'done'.
+    Anything still missing (unreachable, thin page, dead-cache skip) -> 'failed'
+    so it isn't retried every cycle but stays visible for diagnostics.
+    """
+    if not urls:
+        return
+    with get_db() as conn:
+        for url in urls:
+            indexed = conn.execute(
+                "SELECT 1 FROM pages WHERE url = ?", (url,)
+            ).fetchone()
+            status = "done" if indexed is not None else "failed"
+            conn.execute(
+                "UPDATE crawl_queue SET status = ? WHERE url = ?", (status, url)
+            )
+        conn.commit()
+
+
 def get_crawl_urls(include_dead: bool = False) -> List[str]:
     """URLs to feed into a scheduled crawl.
 

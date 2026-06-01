@@ -31,8 +31,11 @@ from api.models import record_crawl_stats
 from crawler.ai_describe import describe
 from crawler.dead_cache import clear_dead, is_dead, record_dead, revive_candidates
 from crawler.models import (
+    claim_queue_batch,
     get_crawl_urls,
     mark_dead,
+    reconcile_queue,
+    requeue_pending,
     revive_check,
     should_recrawl,
     upsert_page,
@@ -392,10 +395,17 @@ async def crawl_cycle(weekly: bool = False) -> None:
     started = time.monotonic()
 
     seeds = _build_seed_set(weekly)
+
+    # Fold user-submitted URLs from crawl_queue into this cycle's frontier.
+    # Tracked separately so we can reconcile their queue status afterwards.
+    queued = claim_queue_batch()
+    seeds.update(queued)
+
     logger.info(
-        "%s crawl: queuing %d URLs (seeds + revived + scheduled)",
+        "%s crawl: queuing %d URLs (seeds + revived + scheduled + %d queued)",
         "Weekly" if weekly else "Daily",
         len(seeds),
+        len(queued),
     )
     for url in seeds:
         # Seeds start at depth 0.
@@ -406,6 +416,8 @@ async def crawl_cycle(weekly: bool = False) -> None:
         # Don't burn a cycle hammering dead onions if Tor isn't routing yet.
         if not await verify_tor(client):
             logger.error("Skipping crawl cycle: Tor proxy not ready")
+            # Release the claim so these URLs are retried on the next cycle.
+            requeue_pending(queued)
             return
 
         tasks = [
@@ -413,6 +425,12 @@ async def crawl_cycle(weekly: bool = False) -> None:
             for _ in range(CRAWLER_WORKERS)
         ]
         await asyncio.gather(*tasks)
+
+    # Mark claimed queue URLs 'done' (now in pages) or 'failed' (still missing).
+    try:
+        reconcile_queue(queued)
+    except Exception:
+        logger.exception("Failed to reconcile crawl queue")
 
     elapsed = max(time.monotonic() - started, 0.001)
     pages_per_hour = state.saved / elapsed * 3600
