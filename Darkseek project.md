@@ -24,6 +24,11 @@
 - [x] API /health, /stats, /metrics, /api/search, /api/submit работают ✅
 - [x] Поиск работает: фронтенд рендерит результаты с датами ✅
 - [x] БД: 1165 страниц проиндексировано (растёт) ✅
+- [x] /api/lookup: проверка URL в индексе (found/not found + карточка) ✅
+- [x] /api/submit/bulk: массовое добавление до 50 URL ✅
+- [x] crawl_queue таблица: очередь на индексацию от пользователей ✅
+- [x] Краулер читает crawl_queue при старте (claim/reconcile/requeue) ✅
+- [x] Submit страница: Check & Submit UI с карточками результатов ✅
 
 ### ✅ Hardening сервера
 - [x] SSH по ключу, root отключён, порт 2020
