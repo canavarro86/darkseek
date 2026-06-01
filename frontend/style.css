@@ -593,7 +593,7 @@ body::after {
 }
 
 /* ============================================================================
-   PAGE: donate — crypto support cards (copyable text addresses, no QR)
+   PAGE: donate — crypto support cards (copyable address + on-demand QR)
    ============================================================================ */
 
 .donate-page .subtitle { margin-bottom: 2rem; }
@@ -666,7 +666,7 @@ body::after {
   text-transform: uppercase;
 }
 
-/* Copyable plain-text address block (replaces the old QR image) */
+/* Copyable plain-text address block */
 .coin-addr {
   color: rgba(0,255,65,0.70);
   font-size: 12px;
@@ -700,6 +700,26 @@ body::after {
 .coin-btn.copied {
   background: rgba(0,255,65,0.3);
   color: #e0ffe8;
+}
+
+/* QR panel — hidden until "Show QR", rendered once on first reveal.
+   Flat #0a0a0a backdrop matches colorLight so the code stays scannable. */
+.coin-qr {
+  margin-top: 0.7rem;
+  padding: 0.7rem;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #0a0a0a;
+  border: 1px solid rgba(0,255,65,0.12);
+}
+.coin-qr[hidden] { display: none; }
+.coin-qr img,
+.coin-qr canvas { display: block; }
+.coin-qr-msg {
+  color: rgba(0,255,65,0.4);
+  font-size: 12px;
+  letter-spacing: 1px;
 }
 
 /* ---- donate mobile ---- */
