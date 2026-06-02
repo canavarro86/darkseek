@@ -25,6 +25,18 @@ def _recrawl_days(url: str) -> int:
     return RECRAWL_DAYS_DEFAULT
 
 
+def checkpoint_wal() -> None:
+    """Truncate the WAL so its sidecar file can't grow without bound.
+
+    TRUNCATE checkpoints every committed frame back into the main DB and then
+    shrinks -wal to zero bytes. Called periodically by the crawler during long
+    continuous cycles (and by the memory watchdog before a forced restart).
+    """
+    with get_db() as conn:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.commit()
+
+
 def should_recrawl(url: str) -> bool:
     """Return True if URL is new or last_seen is older than RECRAWL_DAYS."""
     with get_db() as conn:

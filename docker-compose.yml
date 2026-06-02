@@ -13,8 +13,42 @@ services:
     volumes:
       - ./tor/torrc:/etc/tor/torrc:ro
       - /opt/onion_hidden_keys:/tmp/hidden_service
+    # Normalize the hidden-service key directory before launching tor. Tor
+    # refuses to publish (upload the descriptor to the HSDirs) unless that
+    # directory is private (mode 0700) and owned by the user tor runs as. The
+    # bind mount from /opt/onion_hidden_keys can arrive with host
+    # ownership/permissions that silently disable publishing — the exact
+    # "no HSDir" symptom seen after the CI rebuild switched the base image and
+    # the running user. This touches only metadata, never the persistent keys,
+    # so the .onion address is preserved across restarts.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mkdir -p /tmp/hidden_service
+        chown -R root:root /tmp/hidden_service
+        chmod 700 /tmp/hidden_service
+        if [ -f /tmp/hidden_service/hs_ed25519_secret_key ]; then
+          chmod 600 /tmp/hidden_service/hs_ed25519_secret_key
+        fi
+        echo "[entrypoint] hidden_service permissions normalized; starting tor"
+        # Bootstrap progress is logged at notice level (see torrc Log directive).
+        exec tor -f /etc/tor/torrc
     networks:
       - darkseek
+    healthcheck:
+      # Verify the SOCKS5 proxy is actually answering: send a no-auth
+      # method-negotiation handshake (VER=5, NMETHODS=1, METHOD=0) and expect
+      # tor to reply VER=5, METHOD=0 (0x05 0x00). A listening-but-wedged tor
+      # therefore reads as unhealthy. nc/od ship in the alpine busybox base.
+      test:
+        - CMD-SHELL
+        - printf '\005\001\000' | nc -w 5 127.0.0.1 9050 | od -An -tx1 | grep -q '05 00'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     logging:
       driver: json-file
       options:
