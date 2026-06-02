@@ -92,7 +92,7 @@ services:
     # under this: bounded queue/visited set (10k-page run ceiling), streaming
     # enrichment, no full-table loads. Envelope: tor 180 + api 180 + nginx 32 +
     # crawler 256 = 648m of 1024m. See self-review.
-    mem_limit: 256m
+    mem_limit: 280m
     volumes:
       - /opt/darkseek_db:/app/db
     depends_on:

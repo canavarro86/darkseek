@@ -297,6 +297,24 @@
     .badge.service { background: rgba(0,255,65,0.12); border-color: rgba(0,255,65,0.3);  }
     .badge.other   { background: rgba(0,255,65,0.05); border-color: rgba(0,255,65,0.2);  }
 
+    /* Freshness badges (v1.4). Driven entirely by the API `freshness_tier`. */
+    .badge-fresh {
+      font-size: 0.65rem;
+      letter-spacing: 1px;
+      padding: 0.12rem 0.45rem;
+      text-transform: uppercase;
+      background: #00ff41;
+      color: #000;
+    }
+    .badge-archived {
+      font-size: 0.65rem;
+      letter-spacing: 1px;
+      padding: 0.12rem 0.45rem;
+      text-transform: uppercase;
+      background: #444;
+      color: #888;
+    }
+
     .result-lang  { color: rgba(0,255,65,0.30); font-size: 0.68rem; }
     .result-score { color: rgba(0,255,65,0.25); font-size: 0.68rem; margin-left: auto; }
 
@@ -767,11 +785,13 @@
         <div class="result-url">${escHtml(r.url)}</div>
         <div class="result-desc">${highlight(escHtml(r.description || ''), terms)}</div>
         <div class="result-dates">
-          <span>scanned: ${escHtml(relativeDate(r.last_seen))}</span>
+          <span>scanned: ${escHtml(scannedLabel(r))}</span>
           <span>indexed: ${escHtml(r.indexed_at ? r.indexed_at.slice(0, 10) : '')}</span>
         </div>
         <div class="result-footer">
           <span class="badge ${escAttr(r.category || 'other')}">${escHtml(r.category || 'other')}</span>
+          ${r.freshness_tier === 'fresh' ? '<span class="badge-fresh">● FRESH</span>' : ''}
+          ${r.freshness_tier === 'archived' ? '<span class="badge-archived">◌ ARCHIVED</span>' : ''}
           ${r.lang ? `<span class="result-lang">${escHtml(r.lang)}</span>` : ''}
           <span class="result-score">score: ${(r.score || 0).toFixed(2)}</span>
         </div>
@@ -806,6 +826,19 @@
     if (days === 0) return 'today';
     if (days === 1) return 'yesterday';
     return days + ' days ago';
+  }
+
+  // "scanned" label for a result. Prefer the API-provided days_since_scan (we
+  // never compute freshness client-side); fall back to relativeDate only when
+  // an older API response omits the field.
+  function scannedLabel(r) {
+    const d = r.days_since_scan;
+    if (typeof d === 'number') {
+      if (d === 0) return 'today';
+      if (d === 1) return 'yesterday';
+      return d + 'd ago';
+    }
+    return relativeDate(r.last_seen);
   }
 
   function escHtml(s) {

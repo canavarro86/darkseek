@@ -59,7 +59,7 @@ QUEUE_IDLE_TIMEOUT = 60
 # graph rather than with the page cap, plus an RSS watchdog as the backstop.
 VISITED_MAX = 50_000            # max URLs tracked for dedup; LRU eviction past this
 QUEUE_MAX = 10_000              # max pending frontier items; overflow links dropped
-RSS_LIMIT_MB = 220.0            # restart the crawler if RSS exceeds this
+RSS_LIMIT_MB = 250.0            # restart the crawler if RSS exceeds this
 WATCHDOG_INTERVAL = 15.0        # seconds between RSS checks
 WAL_CHECKPOINT_INTERVAL = 1000  # checkpoint the WAL every N saved pages
 
