@@ -87,12 +87,22 @@
 - [x] nginx: CSP обновлён — разрешён cdnjs.cloudflare.com для qrcodejs/spark-md5 ✅
 - [x] БД: ~39.5k страниц (выросла с 1165 за ночь краулинга) ✅
 
-### ✅ Release v1.3 — Search Quality
+### ✅ Release v1.3 — Search Quality & Stability
 - [x] Query parser: "phrase", AND/OR, -exclude, injection protection
 - [x] Stemmer: Snowball en/ru query-time (searching=search, магазины=магазин)
 - [x] Synonym dictionary: ~50 darknet bilingual groups (btc=bitcoin=криптовалюта)
 - [x] Composite scoring: BM25*0.6 + freshness*0.4 * alive_boost (фикс always-0 бага)
 - [x] Frontend: подсветка совпадений в результатах (<mark> тег)
+- [x] Full audit: memory bounds, reliability, CI hardening (Claude Code) ✅
+- [x] BoundedVisited (50k LRU) + bounded queue (10k) в crawler ✅
+- [x] RSS watchdog: restart при >220MB + WAL checkpoint каждые 1000 страниц ✅
+- [x] Exponential backoff 2s/4s/8s на fetch retries ✅
+- [x] CI/CD: docker system prune, 10min timeout, rollback на failed healthcheck ✅
+- [x] nginx: worker_connections 512, keepalive 32, proxy_read_timeout 30s ✅
+- [x] Tor Hidden Service восстановлен: chown root:root + user: root ✅
+- [x] Stemmer fix: NOSTEM_WORDS (291 технических терминов) — crypto→crypto ✅
+- [x] Фильтр clearnet доменов из поиска (pending) ✅
+- [x] БД: ~39.7k страниц ✅
 
 ### ✅ Frontend
 - [x] Donate страница: 6 кошельков (BTC/ETH/USDT/LTC/DOGE/SOL), QR коды, COPY кнопки ✅
