@@ -2,7 +2,7 @@ services:
 
   tor:
     image: osminogin/tor-simple:latest
-    # user: "root" - FIX startup permissions issues with bind mounts. The tor image's default non-root user
+    user: "root"
     restart: unless-stopped
     # Tor sat at ~105/120MiB (87%, OOM-imminent). Raise the ceiling to 180m and
     # give it a soft floor so the scheduler doesn't reclaim its pages under
@@ -27,7 +27,7 @@ services:
       - |
         set -e
         mkdir -p /tmp/hidden_service
-        chown -R tor:tor /tmp/hidden_service
+        chown -R root:root /tmp/hidden_service
         chmod 700 /tmp/hidden_service
         if [ -f /tmp/hidden_service/hs_ed25519_secret_key ]; then
           chmod 600 /tmp/hidden_service/hs_ed25519_secret_key

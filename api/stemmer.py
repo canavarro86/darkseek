@@ -34,6 +34,44 @@ _STEMMERS = {
 # Any Cyrillic character routes the token through the Russian stemmer.
 _CYRILLIC_RE = re.compile(r"[а-яёА-ЯЁ]")
 
+# Technical/domain terms the English Snowball stemmer mangles (e.g. it reduces
+# "crypto" -> "cry", which breaks search entirely). Any word listed here is
+# returned by stem_word unchanged. Seeded with common darknet jargon and, on
+# first use, extended with every single-token member of SYNONYM_GROUPS — that
+# import is deferred (see _extend_nostem_from_synonyms) because api.synonyms
+# imports this module, so a top-level import here would be circular.
+NOSTEM_WORDS = {
+    "crypto", "hack", "hacking", "onion", "darknet", "darkweb", "tor", "vpn",
+    "pgp", "btc", "xmr", "eth", "cvv", "ddos", "0day", "zeroday", "warez",
+    "sql", "php", "ssh", "rdp", "ftp", "smtp", "api", "url", "ip", "dns", "db",
+}
+
+_nostem_extended = False
+
+
+def _extend_nostem_from_synonyms() -> None:
+    """Add every single-token SYNONYM_GROUPS member to NOSTEM_WORDS, once.
+
+    Deferred rather than imported at module top: api.synonyms imports stem_word
+    from this module, so importing SYNONYM_GROUPS at load time would be a
+    circular import. Running it lazily on the first stem_word call guarantees
+    both modules are fully loaded regardless of which is imported first.
+    """
+    global _nostem_extended
+    if _nostem_extended:
+        return
+    _nostem_extended = True
+    try:
+        from .synonyms import SYNONYM_GROUPS
+
+        for group in SYNONYM_GROUPS:
+            for member in group:
+                if " " not in member:  # skip any multi-word entries
+                    NOSTEM_WORDS.add(member.lower())
+    except Exception:
+        # Never let synonym loading break stemming; the seeded set still applies.
+        pass
+
 
 def detect_lang(token: str) -> str:
     """Return 'ru' for tokens containing Cyrillic, otherwise 'en'."""
@@ -43,9 +81,14 @@ def detect_lang(token: str) -> str:
 def stem_word(word: str) -> str:
     """Stem a single word with the algorithm matching its script.
 
-    Best-effort: any PyStemmer failure returns the word unchanged so search
-    never breaks because of the stemmer.
+    Words in NOSTEM_WORDS (technical terms + synonym members) are returned
+    unchanged so the stemmer can't mangle them. Best-effort otherwise: any
+    PyStemmer failure returns the word unchanged so search never breaks because
+    of the stemmer.
     """
+    _extend_nostem_from_synonyms()
+    if word.lower() in NOSTEM_WORDS:
+        return word
     try:
         return _STEMMERS[detect_lang(word)].stemWord(word)
     except Exception:
