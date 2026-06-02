@@ -1,7 +1,7 @@
 services:
 
   tor:
-    image: torproject/tor:0.4.8.12
+    image: osminogin/tor-simple:latest
     user: "root"
     restart: unless-stopped
     # Tor sat at ~105/120MiB (87%, OOM-imminent). Raise the ceiling to 180m and
