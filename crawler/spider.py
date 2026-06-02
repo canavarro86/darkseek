@@ -249,6 +249,9 @@ class RunState:
 
 
 MAX_RETRIES = 3
+# Base delay for the exponential backoff between connection retries (seconds):
+# attempt 0 waits 2s, attempt 1 waits 4s, ...
+RETRY_BACKOFF_BASE = 2
 
 # Tor circuits are slow to build but reads should not hang forever. Split the
 # connect budget from the read budget so a dead peer fails fast while a slow
@@ -320,9 +323,11 @@ async def fetch(client: httpx.AsyncClient, url: str) -> Tuple[str | None, str]:
                 logger.warning("HTTP %d: %s", status, url)
             return None, FETCH_SKIP
         except (httpx.ConnectError, httpx.TimeoutException) as e:
-            # Connection-level failure: retry, and if it persists, it's dead.
+            # Connection-level failure: retry with exponential backoff
+            # (2s, 4s, 8s ...) so a struggling circuit gets progressively more
+            # breathing room; if it still fails, the site is treated as dead.
             if attempt < MAX_RETRIES - 1:
-                await asyncio.sleep(2)
+                await asyncio.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
             else:
                 logger.warning("Connection failed after %d attempts: %s — %s", MAX_RETRIES, url, e)
                 return None, FETCH_DEAD

@@ -362,7 +362,8 @@ def _call_api(text: str, url: str, fallback: dict) -> dict | None:
         _breaker.record_failure()
         return None
 
-    # Log token usage so monthly cost can be monitored from the logs.
+    # Log token usage on every call so monthly cost/budget can be tracked from
+    # the logs. Never let a usage-logging hiccup mask a successful API call.
     try:
         u = resp.usage
         logger.info(
@@ -374,7 +375,7 @@ def _call_api(text: str, url: str, fallback: dict) -> dict | None:
             getattr(u, "cache_creation_input_tokens", 0),
         )
     except Exception:
-        pass
+        logger.debug("Could not read token usage for %s", url, exc_info=True)
 
     try:
         raw = "".join(
