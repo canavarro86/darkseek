@@ -64,6 +64,10 @@ ONION_RE = re.compile(r"^https?://[a-z2-7]{56}\.onion(/.*)?$")
 _submit_rate: dict[str, list[float]] = {}
 SUBMIT_LIMIT = 5
 SUBMIT_WINDOW = 3600
+# Hard cap on tracked IPs so the limiter can't be grown without bound by a
+# stream of distinct source addresses. Past this, fully-expired entries are
+# swept before admitting a new one.
+SUBMIT_MAX_IPS = 10_000
 
 
 def _sanitize_query(raw: str) -> str:
@@ -80,6 +84,19 @@ def _client_ip() -> str:
     return request.remote_addr or "unknown"
 
 
+def _sweep_submit_rate(now: float) -> None:
+    """Drop IPs whose timestamps have all aged out of the window.
+
+    Keeps the limiter bounded: without this, every distinct source IP would add
+    a permanent dict entry. Only triggered once the table grows past the cap, so
+    it's O(n) at most once per burst of new IPs, not per request.
+    """
+    stale = [ip for ip, times in _submit_rate.items()
+             if not any(now - t < SUBMIT_WINDOW for t in times)]
+    for ip in stale:
+        del _submit_rate[ip]
+
+
 def _submit_allowed(ip: str) -> bool:
     """Sliding-window rate check. Prunes stale timestamps on every call."""
     now = time.time()
@@ -87,6 +104,9 @@ def _submit_allowed(ip: str) -> bool:
     if len(times) >= SUBMIT_LIMIT:
         _submit_rate[ip] = times
         return False
+    # Bound the table before admitting a brand-new IP.
+    if ip not in _submit_rate and len(_submit_rate) >= SUBMIT_MAX_IPS:
+        _sweep_submit_rate(now)
     times.append(now)
     _submit_rate[ip] = times
     return True

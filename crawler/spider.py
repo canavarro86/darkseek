@@ -15,9 +15,9 @@ import os
 import re
 import sys
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from datetime import datetime, timedelta, timezone
-from typing import Set, Tuple
+from typing import Tuple
 from urllib.parse import urlparse
 
 import httpx
@@ -31,6 +31,7 @@ from api.models import record_crawl_stats
 from crawler.ai_describe import describe
 from crawler.dead_cache import clear_dead, is_dead, record_dead, revive_candidates
 from crawler.models import (
+    checkpoint_wal,
     claim_queue_batch,
     get_crawl_urls,
     mark_dead,
@@ -52,6 +53,85 @@ CRAWLER_WORKERS = int(os.environ.get("CRAWLER_WORKERS", "5"))
 # continuous indexing; the default keeps the queue from being hammered empty.
 CYCLE_SLEEP = float(os.environ.get("CYCLE_SLEEP", "30"))
 QUEUE_IDLE_TIMEOUT = 60
+
+# --- Memory bounds (1GB box, crawler budget 256MB) --------------------------
+# Hard ceilings on the two structures that would otherwise grow with the link
+# graph rather than with the page cap, plus an RSS watchdog as the backstop.
+VISITED_MAX = 50_000            # max URLs tracked for dedup; LRU eviction past this
+QUEUE_MAX = 10_000              # max pending frontier items; overflow links dropped
+RSS_LIMIT_MB = 220.0            # restart the crawler if RSS exceeds this
+WATCHDOG_INTERVAL = 15.0        # seconds between RSS checks
+WAL_CHECKPOINT_INTERVAL = 1000  # checkpoint the WAL every N saved pages
+
+
+class BoundedVisited:
+    """Visited-URL membership set with a hard cap and LRU eviction.
+
+    The per-cycle visited set would otherwise grow with every URL dequeued
+    (pages *and* all their extracted links), unbounded by MAX_PAGES_PER_RUN.
+    Cap it at VISITED_MAX; when full, evict the least-recently-added URL. An
+    evicted URL may be re-crawled later, which is an acceptable trade for a
+    bounded footprint on a 1GB box.
+    """
+
+    def __init__(self, maxsize: int = VISITED_MAX) -> None:
+        self._maxsize = maxsize
+        self._data: "OrderedDict[str, None]" = OrderedDict()
+
+    def __contains__(self, url: str) -> bool:
+        return url in self._data
+
+    def add(self, url: str) -> None:
+        if url in self._data:
+            return
+        self._data[url] = None
+        if len(self._data) > self._maxsize:
+            self._data.popitem(last=False)  # evict oldest
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+
+def _rss_mb() -> float | None:
+    """Resident set size of this process in MiB, or None if unavailable.
+
+    Reads /proc/self/status (present in the Linux container). Returns None off
+    Linux or on any read error so the watchdog simply no-ops instead of raising.
+    """
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024.0  # kB -> MiB
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+async def memory_watchdog() -> None:
+    """Restart the crawler if its RSS exceeds RSS_LIMIT_MB.
+
+    Runs for the whole process lifetime (including between cycles). On breach it
+    checkpoints the WAL so no indexed pages are stranded, then exits non-zero so
+    Docker's restart policy brings up a clean process. This is the backstop for
+    the bounded queue/visited set above.
+    """
+    while True:
+        await asyncio.sleep(WATCHDOG_INTERVAL)
+        rss = _rss_mb()
+        if rss is None:
+            continue
+        if rss > RSS_LIMIT_MB:
+            logger.error(
+                "Memory watchdog: RSS %.0fMiB exceeds %.0fMiB limit — "
+                "checkpointing WAL and restarting",
+                rss, RSS_LIMIT_MB,
+            )
+            try:
+                checkpoint_wal()
+            except Exception:
+                logger.exception("Watchdog WAL checkpoint failed")
+            os._exit(1)
 
 # Per-domain rate limit: never hit the same .onion more than once per 10s, even
 # with multiple concurrent workers. Maps domain -> monotonic time of its next
@@ -139,6 +219,7 @@ class RunState:
         self.host_templates: dict[str, Counter] = {}  # host -> template -> count
         self.trapped_hosts: set[str] = set()         # hosts flagged as traps
         self.capped_hosts: set[str] = set()          # hosts that hit PER_HOST_CAP (logged once)
+        self.dropped_links = 0                        # links dropped on a full queue
 
     def run_ceiling_reached(self) -> bool:
         return self.saved >= MAX_PAGES_PER_RUN
@@ -254,7 +335,7 @@ async def fetch(client: httpx.AsyncClient, url: str) -> Tuple[str | None, str]:
 
 async def worker(
     queue: asyncio.Queue,
-    visited: Set[str],
+    visited: BoundedVisited,
     semaphore: asyncio.Semaphore,
     client: httpx.AsyncClient,
     state: RunState,
@@ -334,6 +415,15 @@ async def worker(
                 state.note_saved(host)
                 logger.info("Saved: [%s] %s", meta["category"], meta["title"][:80])
 
+                # Periodically truncate the WAL so the -wal sidecar can't grow
+                # without bound across a long continuous cycle.
+                if state.saved % WAL_CHECKPOINT_INTERVAL == 0:
+                    try:
+                        checkpoint_wal()
+                        logger.info("WAL checkpoint at %d saved pages", state.saved)
+                    except Exception:
+                        logger.exception("Periodic WAL checkpoint failed")
+
                 # Enqueue children unless we're at the depth limit. Depth caps
                 # how far we wander from a seed and starves pagination traps.
                 if depth < MAX_DEPTH and not state.run_ceiling_reached():
@@ -347,7 +437,13 @@ async def worker(
                         # is_trap_link also updates the per-host variant counter.
                         if state.is_trap_link(link):
                             continue
-                        await queue.put((link, depth + 1))
+                        # Bounded frontier: if the queue is at QUEUE_MAX, drop the
+                        # link rather than block. Bounded memory beats exhaustive
+                        # coverage; dropped links resurface via seeds next cycle.
+                        try:
+                            queue.put_nowait((link, depth + 1))
+                        except asyncio.QueueFull:
+                            state.dropped_links += 1
 
                 await asyncio.sleep(CRAWLER_DELAY)
         except Exception:
@@ -369,9 +465,9 @@ def is_weekly_crawl() -> bool:
     return datetime.now(timezone.utc).weekday() == 6
 
 
-def _build_seed_set(weekly: bool) -> Set[str]:
+def _build_seed_set(weekly: bool) -> set[str]:
     """Assemble the URL set for a cycle: seeds + revived + scheduled DB URLs."""
-    urls: Set[str] = set(SEED_URLS)
+    urls: set[str] = set(SEED_URLS)
 
     # Always give long-dead sites a fresh chance at the top of a cycle.
     urls.update(revive_check())
@@ -386,11 +482,12 @@ def _build_seed_set(weekly: bool) -> Set[str]:
 
 
 async def crawl_cycle(weekly: bool = False) -> None:
-    queue: asyncio.Queue = asyncio.Queue()
+    # Bounded frontier: workers drop links once the queue holds QUEUE_MAX items.
+    queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_MAX)
     semaphore = asyncio.Semaphore(CRAWLER_WORKERS)
     # Fresh per-cycle visited set so each scheduled run re-crawls from scratch
-    # (freshness is still gated by should_recrawl()).
-    visited: Set[str] = set()
+    # (freshness is still gated by should_recrawl()). Bounded + LRU-evicting.
+    visited = BoundedVisited(VISITED_MAX)
     state = RunState()
     started = time.monotonic()
 
@@ -407,9 +504,21 @@ async def crawl_cycle(weekly: bool = False) -> None:
         len(seeds),
         len(queued),
     )
+    seeded = 0
     for url in seeds:
-        # Seeds start at depth 0.
-        await queue.put((url, 0))
+        # Seeds start at depth 0. Use put_nowait so a seed set larger than
+        # QUEUE_MAX can't deadlock here (workers don't run yet); overflow seeds
+        # are deferred to the next cycle, where get_crawl_urls() re-supplies them.
+        try:
+            queue.put_nowait((url, 0))
+            seeded += 1
+        except asyncio.QueueFull:
+            break
+    if seeded < len(seeds):
+        logger.warning(
+            "Queue cap %d reached while seeding; deferred %d URLs to next cycle",
+            QUEUE_MAX, len(seeds) - seeded,
+        )
 
     transport = httpx.AsyncHTTPTransport(proxy=TOR_PROXY)
     async with httpx.AsyncClient(transport=transport) as client:
@@ -436,13 +545,14 @@ async def crawl_cycle(weekly: bool = False) -> None:
     pages_per_hour = state.saved / elapsed * 3600
     logger.info(
         "Crawl cycle done. Visited %d URLs, saved %d pages in %.0fs (%.1f pages/hour). "
-        "Hosts capped: %d, traps flagged: %d.",
+        "Hosts capped: %d, traps flagged: %d, links dropped (queue full): %d.",
         len(visited),
         state.saved,
         elapsed,
         pages_per_hour,
         len(state.capped_hosts),
         len(state.trapped_hosts),
+        state.dropped_links,
     )
     if state.run_ceiling_reached():
         logger.warning("Run ceiling hit: stopped at %d pages", MAX_PAGES_PER_RUN)
@@ -456,6 +566,8 @@ async def run() -> None:
     # Continuous mode: crawl cycle after cycle with only CYCLE_SLEEP seconds of
     # pause between them, so indexing runs as fast as the queue allows. Sundays
     # still trigger a weekly full crawl.
+    # Always-on RSS backstop: restarts the process if it outgrows its budget.
+    asyncio.create_task(memory_watchdog())
     logger.info("Starting bootstrap crawl")
     await crawl_cycle(weekly=is_weekly_crawl())
     while True:
