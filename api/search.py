@@ -3,9 +3,10 @@
 Pipeline per request:
   1. parse_query()  turns raw input into a safe FTS5 MATCH expression, a list
      of terms to exclude, and the plain terms (for the frontend to highlight).
-  2. FTS5 MATCH selects candidate rows (alive only) ordered by BM25 `rank`.
-  3. compute_score() re-ranks the candidate window by BM25 + freshness + alive,
-     and that score is returned in the API `score` field.
+  2. FTS5 MATCH selects candidate rows ordered by BM25 `rank`.
+  3. compute_score() re-ranks the candidate window by BM25 + freshness + tier,
+     with every alive page sorted ahead of any archived (is_alive=0) page, and
+     that score is returned in the API `score` field.
 
 The public contract is unchanged: search_pages(query, page, page_size, category)
 -> (list[dict], total). The result dicts gain a meaningful `score` (previously
@@ -16,7 +17,7 @@ shape is backward-compatible.
 from typing import List, Optional, Tuple
 
 from .models import get_db
-from .scoring import compute_score
+from .scoring import compute_score, days_since_scan, freshness_tier
 from .search_parser import parse_query
 from .stemmer import stem_word
 from .search_parser import _quote  # FTS5 string-literal quoting (shared helper)
@@ -94,13 +95,15 @@ def search_pages(
     if category:
         where_extra = " AND p.category = ?"
 
+    # Alive (FRESH + stale) and archived (is_alive=0) pages are all selected; the
+    # composite re-rank below sorts every alive result ahead of any archived one.
     sql = f"""
         SELECT p.id, p.url, p.title, p.description, p.category,
                p.lang, p.indexed_at, p.last_seen, p.is_alive,
                pages_fts.rank AS fts_rank
         FROM pages_fts
         JOIN pages p ON pages_fts.rowid = p.id
-        WHERE pages_fts MATCH ? AND p.is_alive = 1{where_extra}
+        WHERE pages_fts MATCH ?{where_extra}
         ORDER BY pages_fts.rank
         LIMIT ?
     """
@@ -108,7 +111,7 @@ def search_pages(
         SELECT COUNT(*)
         FROM pages_fts
         JOIN pages p ON pages_fts.rowid = p.id
-        WHERE pages_fts MATCH ? AND p.is_alive = 1{where_extra}
+        WHERE pages_fts MATCH ?{where_extra}
     """
 
     fetch_params = list(params)
@@ -134,6 +137,9 @@ def search_pages(
             "lang": r["lang"],
             "indexed_at": r["indexed_at"],
             "last_seen": r["last_seen"],
+            "is_alive": r["is_alive"],
+            "freshness_tier": freshness_tier(r["is_alive"], r["last_seen"]),
+            "days_since_scan": days_since_scan(r["last_seen"]),
             "score": round(
                 compute_score(r["fts_rank"], r["last_seen"], r["is_alive"]), 4
             ),
@@ -141,7 +147,9 @@ def search_pages(
         }
         scored.append(d)
 
-    # Sort by composite score desc; break ties on BM25 rank then id for stability.
-    scored.sort(key=lambda d: (-d["score"], d["url"]))
+    # Alive pages (FRESH + stale) always rank above archived ones, regardless of
+    # score; within each group, sort by composite score desc, breaking ties on
+    # url for stability.
+    scored.sort(key=lambda d: (0 if d["is_alive"] else 1, -d["score"], d["url"]))
 
     return scored[offset : offset + page_size], total

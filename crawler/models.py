@@ -13,6 +13,14 @@ RECRAWL_DAYS_DEFAULT = 7
 RECRAWL_DAYS_FORUM = 1
 FORUM_PATTERNS = ["forum", "board", "thread", "topic", "chan"]
 
+# How long a dead (is_alive=0) page waits before revive_check() gives it another
+# crawl attempt. Raised from 7 to 30 days for v1.4: dead sites rarely return, so
+# re-checking them weekly wastes slow Tor circuits that fresh/live content needs.
+# A 30-day cadence still resurrects a genuinely-returned site within a month.
+# This bound applies only to is_alive=0 rows; live-page recrawl cadence
+# (RECRAWL_DAYS_DEFAULT / RECRAWL_DAYS_FORUM, via should_recrawl) is untouched.
+REVIVE_DEAD_DAYS = 30
+
 # A site is only marked dead after this many consecutive fetch failures, so a
 # transient outage doesn't immediately drop it from the index.
 MAX_FAIL_COUNT = 3
@@ -156,14 +164,16 @@ def mark_alive(url: str) -> None:
 def revive_check() -> List[str]:
     """Give long-dead sites another chance.
 
-    Finds sites marked dead whose last successful sighting is older than 7 days,
-    resets them to alive with a clean fail counter, and returns their URLs so the
-    crawler can re-queue them.
+    Finds sites marked dead whose last successful sighting is older than
+    REVIVE_DEAD_DAYS (30), resets them to alive with a clean fail counter, and
+    returns their URLs so the crawler can re-queue them. Only is_alive=0 rows are
+    touched, so live pages are unaffected.
     """
     with get_db() as conn:
         rows = conn.execute(
             "SELECT url FROM pages "
-            "WHERE is_alive = 0 AND last_seen < datetime('now', '-7 days')"
+            "WHERE is_alive = 0 AND last_seen < datetime('now', ?)",
+            (f"-{REVIVE_DEAD_DAYS} days",),
         ).fetchall()
         urls = [r["url"] for r in rows]
         if urls:
