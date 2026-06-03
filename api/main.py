@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 import re
@@ -167,13 +168,24 @@ def search():
     if category and category not in CATEGORIES:
         return jsonify({"error": f"invalid category, must be one of {sorted(CATEGORIES)}"}), 400
 
+    # Content filtering is ON unless explicitly disabled with safe_mode=false.
+    safe_mode = request.args.get("safe_mode", "true").lower() != "false"
+
     try:
-        results, total = search_pages(query, page=page, category=category)
+        results, total = search_pages(
+            query, page=page, category=category, safe_mode=safe_mode
+        )
     except Exception:
-        logger.exception("Search failed for query=%r", query)
+        # No-logs policy (see /privacy.html): never log the raw query text. Log
+        # only its length so a failure is still diagnosable without retaining it.
+        logger.exception("Search failed (qlen=%d)", len(query))
         return jsonify({"error": "internal server error"}), 500
 
-    logger.info("search q=%r category=%s page=%d -> %d hits", query, category, page, total)
+    # Query text is deliberately NOT logged — only metadata (length + hit count).
+    logger.info(
+        "search qlen=%d category=%s page=%d safe=%s -> %d hits",
+        len(query), category, page, safe_mode, total,
+    )
     return jsonify(
         {
             "query": query,
@@ -182,6 +194,159 @@ def search():
             "results": results,
         }
     )
+
+
+# --- v2.0 community trust: Proof-of-Work-gated voting / reporting -------------
+# A PoW gate (no accounts, no IPs) makes ballot-stuffing costly: every vote/report
+# requires a SHA256 partial pre-image. Challenges live in SQLite (pow_challenges)
+# so any gunicorn worker validates a challenge another worker minted; pow_hash is
+# UNIQUE across votes+reports, so a solved proof is single-use (replay-proof).
+POW_DIFFICULTY = 4                       # SHA256(challenge+nonce) must start "0000"
+POW_PREFIX = "0" * POW_DIFFICULTY
+CHALLENGE_TTL = 300                      # seconds (5 min)
+REPORT_REASONS = {"scam", "offline", "illegal", "spam"}
+SCAM_AUTOTAG_THRESHOLD = 5               # >= this many 'scam' reports -> content_tag='scam'
+
+
+def _verify_pow(data: dict):
+    """Shared PoW gate for /api/vote and /api/report.
+
+    Returns ((page_id, pow_hash), None) on success, or (None, (response, status))
+    on any failure. Validates: challenge present+unexpired (DB-backed, cross-worker),
+    SHA256 prefix difficulty, replay (pow_hash unused), page exists. Consumes the
+    challenge and sweeps expired rows on success.
+    """
+    challenge = str(data.get("challenge") or "")
+    nonce = str(data.get("nonce") or "")
+    if not challenge or not nonce:
+        return None, (jsonify({"ok": False, "error": "challenge and nonce required"}), 400)
+
+    pow_hash = hashlib.sha256((challenge + nonce).encode()).hexdigest()
+    if not pow_hash.startswith(POW_PREFIX):
+        return None, (jsonify({"ok": False, "error": "invalid proof of work"}), 400)
+
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT page_id FROM pow_challenges "
+            "WHERE challenge = ? AND expires_at > CURRENT_TIMESTAMP",
+            (challenge,),
+        ).fetchone()
+        if row is None:
+            return None, (jsonify({"ok": False, "error": "challenge expired or unknown"}), 400)
+        page_id = row["page_id"]
+        # Replay guard: a solved proof may be spent exactly once, across both tables.
+        used = (
+            conn.execute("SELECT 1 FROM votes WHERE pow_hash = ?", (pow_hash,)).fetchone()
+            or conn.execute("SELECT 1 FROM reports WHERE pow_hash = ?", (pow_hash,)).fetchone()
+        )
+        if used is not None:
+            return None, (jsonify({"ok": False, "error": "proof already used"}), 409)
+        if conn.execute("SELECT 1 FROM pages WHERE id = ?", (page_id,)).fetchone() is None:
+            return None, (jsonify({"ok": False, "error": "page not found"}), 404)
+        # Consume this challenge and opportunistically sweep expired ones.
+        conn.execute("DELETE FROM pow_challenges WHERE challenge = ?", (challenge,))
+        conn.execute("DELETE FROM pow_challenges WHERE expires_at <= CURRENT_TIMESTAMP")
+        conn.commit()
+    return (page_id, pow_hash), None
+
+
+@app.get("/api/challenge")
+def api_challenge():
+    """Mint a PoW challenge for a page. Stored in SQLite with a 5-minute TTL."""
+    try:
+        page_id = int(request.args.get("page_id", ""))
+    except (ValueError, TypeError):
+        return jsonify({"error": "page_id required"}), 400
+
+    challenge = os.urandom(16).hex()
+    with get_db() as conn:
+        if conn.execute("SELECT 1 FROM pages WHERE id = ?", (page_id,)).fetchone() is None:
+            return jsonify({"error": "page not found"}), 404
+        conn.execute(
+            "INSERT OR REPLACE INTO pow_challenges (challenge, page_id, expires_at) "
+            "VALUES (?, ?, datetime('now', ?))",
+            (challenge, page_id, f"+{CHALLENGE_TTL} seconds"),
+        )
+        conn.commit()
+    resp = jsonify({"challenge": challenge, "difficulty": POW_DIFFICULTY})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.post("/api/vote")
+def api_vote():
+    data = request.get_json(silent=True) or {}
+    vote_type = data.get("vote_type")
+    if vote_type not in ("fresh", "rotten"):
+        return jsonify({"ok": False, "error": "vote_type must be fresh|rotten"}), 400
+
+    verified, err = _verify_pow(data)
+    if err:
+        return err
+    page_id, pow_hash = verified
+
+    col = "fresh_votes" if vote_type == "fresh" else "rotten_votes"
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO votes (page_id, pow_hash, vote_type) VALUES (?, ?, ?)",
+            (page_id, pow_hash, vote_type),
+        )
+        # Tally, then derive onion_score = (fresh / total) * 4 + 1 -> a 1..5 rating.
+        conn.execute(f"UPDATE pages SET {col} = {col} + 1 WHERE id = ?", (page_id,))
+        conn.execute(
+            "UPDATE pages SET onion_score = "
+            "CASE WHEN (fresh_votes + rotten_votes) > 0 "
+            "THEN (CAST(fresh_votes AS REAL) / (fresh_votes + rotten_votes)) * 4 + 1 "
+            "ELSE NULL END WHERE id = ?",
+            (page_id,),
+        )
+        row = conn.execute(
+            "SELECT onion_score FROM pages WHERE id = ?", (page_id,)
+        ).fetchone()
+        conn.commit()
+
+    score = row["onion_score"]
+    logger.info("vote page_id=%d type=%s -> onion_score=%s", page_id, vote_type, score)
+    return jsonify({
+        "ok": True,
+        "onion_score": round(score, 2) if score is not None else None,
+        "display": round(score) if score is not None else None,
+    })
+
+
+@app.post("/api/report")
+def api_report():
+    data = request.get_json(silent=True) or {}
+    reason = data.get("reason")
+    if reason not in REPORT_REASONS:
+        return jsonify(
+            {"ok": False, "error": f"reason must be one of {sorted(REPORT_REASONS)}"}
+        ), 400
+
+    verified, err = _verify_pow(data)
+    if err:
+        return err
+    page_id, pow_hash = verified
+
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO reports (page_id, reason, pow_hash) VALUES (?, ?, ?)",
+            (page_id, reason, pow_hash),
+        )
+        scam_count = conn.execute(
+            "SELECT COUNT(*) FROM reports WHERE page_id = ? AND reason = 'scam'",
+            (page_id,),
+        ).fetchone()[0]
+        # Community auto-tag: enough independent scam reports flips the tag, which
+        # safe-mode search continues to surface but which the UI marks as scam.
+        if scam_count >= SCAM_AUTOTAG_THRESHOLD:
+            conn.execute(
+                "UPDATE pages SET content_tag = 'scam' WHERE id = ?", (page_id,)
+            )
+        conn.commit()
+
+    logger.info("report page_id=%d reason=%s scam_count=%d", page_id, reason, scam_count)
+    return jsonify({"ok": True, "message": "Report recorded"})
 
 
 if os.environ.get("DEBUG") == "1":

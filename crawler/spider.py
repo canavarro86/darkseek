@@ -33,6 +33,7 @@ from crawler.dead_cache import clear_dead, is_dead, record_dead, revive_candidat
 from crawler.models import (
     checkpoint_wal,
     claim_queue_batch,
+    cleanup_inactive_pages,
     get_crawl_urls,
     mark_dead,
     reconcile_queue,
@@ -416,6 +417,7 @@ async def worker(
                     content_hash=content_hash,
                     page_type=parsed.get("page_type", "other"),
                     enrichment_method=meta.get("enrichment_method", "heuristic"),
+                    content_tag=meta.get("content_tag", "unknown"),
                 )
                 state.note_saved(host)
                 logger.info("Saved: [%s] %s", meta["category"], meta["title"][:80])
@@ -575,12 +577,28 @@ async def run() -> None:
     asyncio.create_task(memory_watchdog())
     logger.info("Starting bootstrap crawl")
     await crawl_cycle(weekly=is_weekly_crawl())
+
+    # Run the inactive-page GC at most once per UTC day, after a cycle completes.
+    last_cleanup_day = None
+
+    def _maybe_cleanup() -> None:
+        nonlocal last_cleanup_day
+        today = datetime.now(timezone.utc).date()
+        if today != last_cleanup_day:
+            try:
+                cleanup_inactive_pages()
+            except Exception:
+                logger.exception("Daily inactive-page cleanup failed")
+            last_cleanup_day = today
+
+    _maybe_cleanup()
     while True:
         logger.info("Sleeping %.0fs until next crawl cycle", CYCLE_SLEEP)
         await asyncio.sleep(CYCLE_SLEEP)
         weekly = is_weekly_crawl()
         logger.info("Starting %s crawl", "weekly" if weekly else "daily")
         await crawl_cycle(weekly=weekly)
+        _maybe_cleanup()
 
 
 if __name__ == "__main__":
