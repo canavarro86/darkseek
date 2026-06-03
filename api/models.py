@@ -114,6 +114,55 @@ def migrate(conn: sqlite3.Connection) -> None:
             "AND category IS NOT NULL AND lang IS NOT NULL"
         )
 
+    # v2.0 community-trust columns. Parallel the existing is_alive/last_seen/score
+    # (kept in lockstep by the crawler). Guarded so this is a no-op on a fresh DB
+    # where schema.sql already defined them, and a one-time add on legacy DBs.
+    for _name, _decl in (
+        ("fresh_votes",     "INTEGER DEFAULT 0"),
+        ("rotten_votes",    "INTEGER DEFAULT 0"),
+        ("onion_score",     "REAL DEFAULT NULL"),
+        ("last_scanned_at", "TIMESTAMP"),
+        ("is_active",       "BOOLEAN DEFAULT 1"),
+        ("content_tag",     "TEXT DEFAULT 'unknown'"),
+    ):
+        if not _column_exists(conn, "pages", _name):
+            conn.execute(f"ALTER TABLE pages ADD COLUMN {_name} {_decl}")
+
+    # Community voting / reporting + cross-worker PoW challenge store. Mirrored
+    # from db/schema.sql so a legacy DB converges without re-running schema.sql.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS votes (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            page_id    INTEGER NOT NULL,
+            pow_hash   TEXT UNIQUE NOT NULL,
+            vote_type  TEXT CHECK(vote_type IN ('fresh','rotten')) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (page_id) REFERENCES pages(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reports (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            page_id    INTEGER NOT NULL,
+            reason     TEXT CHECK(reason IN ('scam','offline','illegal','spam')) NOT NULL,
+            pow_hash   TEXT UNIQUE NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pow_challenges (
+            challenge  TEXT PRIMARY KEY,
+            page_id    INTEGER NOT NULL,
+            expires_at TIMESTAMP NOT NULL
+        )
+        """
+    )
+
     # Single-row table holding the latest crawler cycle metrics for /metrics.
     conn.execute(
         """
@@ -168,6 +217,9 @@ def migrate(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_pages_enrichment_method ON pages(enrichment_method)"
     )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_is_active ON pages(is_active)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_content_tag ON pages(content_tag)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_onion_score ON pages(onion_score)")
     conn.commit()
 
     # Best-effort: becomes a no-op once dedupe.py has collapsed duplicates.

@@ -57,8 +57,14 @@ SYSTEM_PROMPT = (
     '{"title": "max 60 chars", '
     '"description": "max 160 chars, what the user will find on this page", '
     '"category": "one of: forum|market|news|wiki|service|other", '
+    '"content_tag": "one of: safe|nsfw|scam|unknown", '
     '"lang": "ISO 639-1 two-letter code, e.g. en, ru, de"}'
 )
+
+# content_tag values the model may return. 'illegal' is reserved for community
+# reports / manual ops, not asked of the model. Anything off-list -> 'unknown'.
+VALID_CONTENT_TAGS = {"safe", "nsfw", "scam", "unknown"}
+DEFAULT_CONTENT_TAG = "unknown"
 
 
 # --- Language normalization (single source of truth) ------------------------
@@ -300,10 +306,19 @@ def _parse_response(raw: str, fallback: dict) -> dict | None:
     category = data.get("category")
     if category not in VALID_CATEGORIES:
         category = fallback["category"]
+    content_tag = data.get("content_tag")
+    if content_tag not in VALID_CONTENT_TAGS:
+        content_tag = fallback.get("content_tag", DEFAULT_CONTENT_TAG)
     lang = normalize_lang(data.get("lang"))
     if lang == LANG_OTHER:
         lang = fallback["lang"]
-    return {"title": title, "description": description, "category": category, "lang": lang}
+    return {
+        "title": title,
+        "description": description,
+        "category": category,
+        "content_tag": content_tag,
+        "lang": lang,
+    }
 
 
 # --- Failure classification -------------------------------------------------
@@ -428,6 +443,10 @@ class HeuristicEnricher:
             "title": title,
             "description": description,
             "category": category,
+            # The heuristic path does no safety classification; leave it unknown
+            # so safe-mode never hides a page on a guess. The AI path sets a real
+            # tag; community reports can escalate it later.
+            "content_tag": DEFAULT_CONTENT_TAG,
             "lang": lang,
             "enrichment_method": METHOD_HEURISTIC,
         }
@@ -468,7 +487,9 @@ class AIEnricher:
         if not text:
             return base  # nothing to send; heuristic is all we have
 
-        fallback = {k: base[k] for k in ("title", "description", "category", "lang")}
+        fallback = {
+            k: base[k] for k in ("title", "description", "category", "content_tag", "lang")
+        }
         result = _call_api(text, url, fallback)
         if result is None:
             return base  # failure already recorded against the breaker
@@ -506,6 +527,7 @@ def describe(html: str, url: str) -> dict:
                 "title": url[:60],
                 "description": "",
                 "category": "other",
+                "content_tag": DEFAULT_CONTENT_TAG,
                 "lang": LANG_OTHER,
                 "enrichment_method": METHOD_HEURISTIC,
             }
@@ -523,7 +545,13 @@ def classify_text(text: str, url: str) -> dict | None:
         return None
     if _get_client() is None or not _breaker.allow():
         return None
-    fallback = {"title": text[:60], "description": text[:160], "category": "other", "lang": LANG_OTHER}
+    fallback = {
+        "title": text[:60],
+        "description": text[:160],
+        "category": "other",
+        "content_tag": DEFAULT_CONTENT_TAG,
+        "lang": LANG_OTHER,
+    }
     result = _call_api(text, url, fallback)
     if result is None:
         return result

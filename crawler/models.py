@@ -72,6 +72,7 @@ def upsert_page(
     content_hash: str | None = None,
     page_type: str = "other",
     enrichment_method: str = "heuristic",
+    content_tag: str = "unknown",
 ) -> None:
     with get_db() as conn:
         # Dedup invariant: the same content_hash must exist under exactly one URL.
@@ -88,7 +89,8 @@ def upsert_page(
             ).fetchone()
             if dup is not None:
                 conn.execute(
-                    "UPDATE pages SET last_seen = CURRENT_TIMESTAMP WHERE url = ?",
+                    "UPDATE pages SET last_seen = CURRENT_TIMESTAMP, "
+                    "last_scanned_at = CURRENT_TIMESTAMP, is_active = 1 WHERE url = ?",
                     (dup["url"],),
                 )
                 conn.commit()
@@ -100,8 +102,8 @@ def upsert_page(
         try:
             conn.execute(
                 """
-                INSERT INTO pages (url, title, description, category, lang, score, is_alive, last_seen, content_hash, page_type, enrichment_method)
-                VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, ?, ?, ?)
+                INSERT INTO pages (url, title, description, category, lang, score, is_alive, is_active, last_seen, last_scanned_at, content_hash, page_type, enrichment_method, content_tag)
+                VALUES (?, ?, ?, ?, ?, ?, 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?, ?)
                 ON CONFLICT(url) DO UPDATE SET
                     title             = excluded.title,
                     description       = excluded.description,
@@ -109,10 +111,13 @@ def upsert_page(
                     lang              = excluded.lang,
                     score             = excluded.score,
                     is_alive          = 1,
+                    is_active         = 1,
                     fail_count        = 0,
+                    last_scanned_at   = CURRENT_TIMESTAMP,
                     content_hash      = excluded.content_hash,
                     page_type         = excluded.page_type,
                     enrichment_method = excluded.enrichment_method,
+                    content_tag       = excluded.content_tag,
                     last_seen    = CASE
                         WHEN excluded.content_hash IS NOT NULL
                              AND excluded.content_hash != COALESCE(pages.content_hash, '')
@@ -120,7 +125,7 @@ def upsert_page(
                         ELSE pages.last_seen
                         END
                 """,
-                (url, title, description, category, lang, score, content_hash, page_type, enrichment_method),
+                (url, title, description, category, lang, score, content_hash, page_type, enrichment_method, content_tag),
             )
             conn.commit()
         except sqlite3.IntegrityError:
@@ -128,7 +133,8 @@ def upsert_page(
             # a different URL (DB-level UNIQUE index caught it). Re-sight instead.
             if content_hash:
                 conn.execute(
-                    "UPDATE pages SET last_seen = CURRENT_TIMESTAMP WHERE content_hash = ?",
+                    "UPDATE pages SET last_seen = CURRENT_TIMESTAMP, "
+                    "last_scanned_at = CURRENT_TIMESTAMP, is_active = 1 WHERE content_hash = ?",
                     (content_hash,),
                 )
                 conn.commit()
@@ -143,11 +149,13 @@ def mark_dead(url: str) -> None:
         conn.execute(
             """
             UPDATE pages
-            SET fail_count = fail_count + 1,
-                is_alive   = CASE WHEN fail_count + 1 >= ? THEN 0 ELSE is_alive END
+            SET fail_count      = fail_count + 1,
+                last_scanned_at = CURRENT_TIMESTAMP,
+                is_alive   = CASE WHEN fail_count + 1 >= ? THEN 0 ELSE is_alive END,
+                is_active  = CASE WHEN fail_count + 1 >= ? THEN 0 ELSE is_active END
             WHERE url = ?
             """,
-            (MAX_FAIL_COUNT, url),
+            (MAX_FAIL_COUNT, MAX_FAIL_COUNT, url),
         )
         conn.commit()
 
@@ -156,7 +164,8 @@ def mark_alive(url: str) -> None:
     """Reset failure state after a successful crawl."""
     with get_db() as conn:
         conn.execute(
-            "UPDATE pages SET is_alive = 1, fail_count = 0 WHERE url = ?", (url,)
+            "UPDATE pages SET is_alive = 1, is_active = 1, fail_count = 0 WHERE url = ?",
+            (url,),
         )
         conn.commit()
 
@@ -178,7 +187,7 @@ def revive_check() -> List[str]:
         urls = [r["url"] for r in rows]
         if urls:
             conn.executemany(
-                "UPDATE pages SET is_alive = 1, fail_count = 0 WHERE url = ?",
+                "UPDATE pages SET is_alive = 1, is_active = 1, fail_count = 0 WHERE url = ?",
                 [(u,) for u in urls],
             )
             conn.commit()
@@ -249,6 +258,45 @@ def reconcile_queue(urls: List[str]) -> None:
                 "UPDATE crawl_queue SET status = ? WHERE url = ?", (status, url)
             )
         conn.commit()
+
+
+def cleanup_inactive_pages() -> int:
+    """Daily GC of long-inactive pages, tiered by community trust.
+
+    Only is_active=0 rows are eligible (a page reachable at last crawl is never
+    deleted here). The retention window scales with trust: well-rated sites are
+    kept longest, low-rated / scam / illegal the shortest, on the bet that a
+    high-onion_score site is worth waiting on for a possible return.
+
+      onion_score 2.0..3.9              -> delete after 30 days inactive
+      onion_score < 2.0 OR scam/illegal -> delete after  7 days inactive
+      onion_score >= 4.0                -> delete after 45 days inactive
+      onion_score IS NULL (unrated)     -> delete after 30 days inactive
+
+    Deleting a page fires the pages_ad trigger, so its FTS row is removed too.
+    Returns the number of rows deleted.
+    """
+    rules = [
+        (30, "onion_score BETWEEN 2.0 AND 3.9"),
+        (7,  "(onion_score < 2.0 OR content_tag IN ('scam','illegal'))"),
+        (45, "onion_score >= 4.0"),
+        (30, "onion_score IS NULL"),
+    ]
+    deleted = 0
+    with get_db() as conn:
+        for days, predicate in rules:
+            cur = conn.execute(
+                f"DELETE FROM pages "
+                f"WHERE is_active = 0 "
+                f"AND last_scanned_at IS NOT NULL "
+                f"AND last_scanned_at < datetime('now', '-{days} days') "
+                f"AND {predicate}"
+            )
+            deleted += cur.rowcount
+        conn.commit()
+    if deleted:
+        logger.info("cleanup: deleted %d inactive pages", deleted)
+    return deleted
 
 
 def get_crawl_urls(include_dead: bool = False) -> List[str]:

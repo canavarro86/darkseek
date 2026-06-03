@@ -222,4 +222,3 @@ db/*.db
 *.log
 logs/
 node_modules/
-DARKSEEK_PROJECT.md

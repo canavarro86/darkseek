@@ -75,12 +75,17 @@ def search_pages(
     page: int = 1,
     page_size: int = PAGE_SIZE,
     category: Optional[str] = None,
+    safe_mode: bool = True,
 ) -> Tuple[List[dict], int]:
     """Search alive pages, composite-ranked. Backward-compatible contract.
 
     Returns (results, total) where results is the requested page of dicts and
     total is the full match count. `raw_terms` for highlighting is also attached
     to each result dict under the `terms` key (additive; existing keys intact).
+
+    safe_mode (default True) hides pages tagged 'illegal'/'nsfw'; 'unknown'
+    (the default tag) and all other tags always pass. safe_mode=False disables
+    the filter entirely.
     """
     match, raw_terms = _build_match(query)
     if not match:
@@ -93,13 +98,20 @@ def search_pages(
     params: List = [match]
     where_extra = ""
     if category:
-        where_extra = " AND p.category = ?"
+        where_extra += " AND p.category = ?"
+    if safe_mode:
+        # 'unknown' is the default and always passes; only illegal/nsfw are hidden.
+        # Literal predicate (no bound param) so count/fetch param lists stay aligned.
+        where_extra += (
+            " AND (p.content_tag NOT IN ('illegal','nsfw') OR p.content_tag = 'unknown')"
+        )
 
     # Alive (FRESH + stale) and archived (is_alive=0) pages are all selected; the
     # composite re-rank below sorts every alive result ahead of any archived one.
     sql = f"""
         SELECT p.id, p.url, p.title, p.description, p.category,
                p.lang, p.indexed_at, p.last_seen, p.is_alive,
+               p.onion_score, p.is_active, p.last_scanned_at, p.content_tag,
                pages_fts.rank AS fts_rank
         FROM pages_fts
         JOIN pages p ON pages_fts.rowid = p.id
@@ -138,6 +150,10 @@ def search_pages(
             "indexed_at": r["indexed_at"],
             "last_seen": r["last_seen"],
             "is_alive": r["is_alive"],
+            "onion_score": r["onion_score"],
+            "is_active": r["is_active"],
+            "last_scanned_at": r["last_scanned_at"],
+            "content_tag": r["content_tag"],
             "freshness_tier": freshness_tier(r["is_alive"], r["last_seen"]),
             "days_since_scan": days_since_scan(r["last_seen"]),
             "score": round(
