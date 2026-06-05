@@ -163,6 +163,26 @@ def migrate(conn: sqlite3.Connection) -> None:
         """
     )
 
+    # Search-query log for index-quality analysis (popular / zero-result terms).
+    # Privacy: no IP, no user identifier — only the query text + result count.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS search_queries (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            query       TEXT NOT NULL,
+            hits        INTEGER DEFAULT 0,
+            safe_mode   BOOLEAN DEFAULT 1,
+            category    TEXT DEFAULT NULL,
+            searched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sq_searched_at "
+        "ON search_queries(searched_at DESC)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sq_query ON search_queries(query)")
+
     # Single-row table holding the latest crawler cycle metrics for /metrics.
     conn.execute(
         """
@@ -275,6 +295,70 @@ def get_crawl_stats() -> dict:
             "cycle_seconds": 0.0,
         }
     return dict(row)
+
+
+def log_search_query(
+    query: str, hits: int, safe_mode: bool, category: str | None
+) -> None:
+    """Record one search for index-quality analysis. Never raises.
+
+    Wrapped end-to-end in try/except so a logging failure can never break or
+    block the search response. Privacy: query stored for index quality analysis
+    only — no IP, no user data.
+    """
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO search_queries (query, hits, safe_mode, category) "
+                "VALUES (?, ?, ?, ?)",
+                (query, hits, 1 if safe_mode else 0, category),
+            )
+            conn.commit()
+    except Exception:
+        # Best-effort analytics only — swallow everything, never surface to caller.
+        logger.debug("log_search_query failed", exc_info=True)
+
+
+def get_search_stats() -> dict:
+    """Aggregate search-log stats for the public /api/search-stats endpoint.
+
+    Returns all-time and 24h counts plus the top and zero-result queries over
+    the last 7 days. Read-only; the table is guaranteed to exist by migrate().
+    """
+    with get_db() as conn:
+        total_searches = conn.execute(
+            "SELECT COUNT(*) FROM search_queries"
+        ).fetchone()[0]
+        searches_today = conn.execute(
+            "SELECT COUNT(*) FROM search_queries "
+            "WHERE searched_at >= datetime('now', '-1 day')"
+        ).fetchone()[0]
+        top_rows = conn.execute(
+            "SELECT query, COUNT(*) AS count, AVG(hits) AS avg_hits "
+            "FROM search_queries "
+            "WHERE searched_at >= datetime('now', '-7 days') "
+            "GROUP BY query ORDER BY count DESC LIMIT 10"
+        ).fetchall()
+        zero_rows = conn.execute(
+            "SELECT query, COUNT(*) AS count FROM search_queries "
+            "WHERE hits = 0 AND searched_at >= datetime('now', '-7 days') "
+            "GROUP BY query ORDER BY count DESC LIMIT 10"
+        ).fetchall()
+    return {
+        "total_searches": total_searches,
+        "searches_today": searches_today,
+        "top_queries": [
+            {
+                "query": r["query"],
+                "count": r["count"],
+                "avg_hits": round(r["avg_hits"] or 0.0, 1),
+            }
+            for r in top_rows
+        ],
+        "zero_result_queries": [
+            {"query": r["query"], "count": r["count"]} for r in zero_rows
+        ],
+    }
 
 
 def db_size_mb() -> float:
