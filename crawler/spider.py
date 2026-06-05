@@ -221,6 +221,7 @@ class RunState:
         self.trapped_hosts: set[str] = set()         # hosts flagged as traps
         self.capped_hosts: set[str] = set()          # hosts that hit PER_HOST_CAP (logged once)
         self.dropped_links = 0                        # links dropped on a full queue
+        self.skipped_media = 0                        # binary/non-HTML URLs skipped (OOM guard)
 
     def run_ceiling_reached(self) -> bool:
         return self.saved >= MAX_PAGES_PER_RUN
@@ -268,6 +269,29 @@ TOR_VERIFY_BACKOFF = 5
 # site dead on these — it's rate limiting / overload, not a missing service.
 TRANSIENT_STATUSES = {403, 429, 503}
 
+# Binary/non-HTML extensions the crawler must never download. Pulling a .mp4 or
+# .iso into memory over Tor is the OOM path that gets the container killed
+# (RSS > budget). Cheap extension check first, HEAD Content-Type probe second.
+SKIP_EXTENSIONS = frozenset({
+    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.ico', '.bmp', '.tiff',
+    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt',
+    '.zip', '.tar', '.gz', '.rar', '.7z', '.bz2',
+    '.mp4', '.mp3', '.avi', '.mkv', '.mov', '.webm', '.ogg', '.wav', '.flac',
+    '.exe', '.bin', '.dmg', '.apk', '.iso', '.torrent',
+    '.css', '.js', '.woff', '.woff2', '.ttf', '.eot', '.json', '.xml',
+})
+
+# Budget for the pre-fetch HEAD probe. Kept short: a slow/unsupported HEAD must
+# not stall the worker — on timeout we fall through to the normal GET.
+HEAD_TIMEOUT = httpx.Timeout(connect=15.0, read=10.0, write=10.0, pool=10.0)
+
+
+def _is_media_url(url: str) -> bool:
+    """True if the URL path ends in a known binary/non-HTML extension."""
+    path = urlparse(url).path
+    ext = os.path.splitext(path)[1].lower()
+    return ext in SKIP_EXTENSIONS
+
 # fetch() outcomes
 FETCH_OK = "ok"        # html returned
 FETCH_DEAD = "dead"    # connection-level failure -> caller marks dead
@@ -311,6 +335,31 @@ async def fetch(client: httpx.AsyncClient, url: str) -> Tuple[str | None, str]:
       - (None, FETCH_SKIP) on any HTTP status error (incl. 403/429/503) or other
                            error — transient/not-dead, caller just skips
     """
+    # 1) Extension fast-path: never even open a known binary asset.
+    if _is_media_url(url):
+        logger.debug("Skip media by extension: %s", url)
+        return None, FETCH_SKIP
+
+    # 2) HEAD probe: reject non-text Content-Type before pulling a body into RAM.
+    #    HEAD failures are non-fatal — a 405 (method not allowed) or a timeout
+    #    just falls through to the normal GET below. Never mark_dead() here; a
+    #    binary file or a HEAD-hostile server is not a dead site.
+    try:
+        head = await client.head(url, timeout=HEAD_TIMEOUT, follow_redirects=True)
+        if head.status_code != 405:
+            content_type = head.headers.get("content-type", "")
+            # Only skip on a *known* non-text type; an empty/unknown type falls
+            # through to GET so we never drop real HTML on a quirky server.
+            if content_type and not content_type.startswith("text/"):
+                logger.debug("Skip non-HTML [%s]: %s", content_type, url)
+                return None, FETCH_SKIP
+    except (httpx.ConnectError, httpx.TimeoutException):
+        # Circuit slow or HEAD unsupported: don't block, let GET decide.
+        pass
+    except Exception:
+        # Any other HEAD hiccup is non-fatal — proceed to GET.
+        pass
+
     for attempt in range(MAX_RETRIES):
         try:
             r = await client.get(url, timeout=HTTP_TIMEOUT, follow_redirects=True)
@@ -380,6 +429,13 @@ async def worker(
 
             if not should_recrawl(url):
                 logger.debug("Skip fresh URL: %s", url)
+                continue
+
+            # Media fast-path: skip binary assets before spending a throttle slot
+            # or a Tor circuit on them. Not a dead site — never mark_dead().
+            if _is_media_url(url):
+                state.skipped_media += 1
+                logger.debug("Skip media URL: %s", url)
                 continue
 
             async with semaphore:
@@ -552,7 +608,8 @@ async def crawl_cycle(weekly: bool = False) -> None:
     pages_per_hour = state.saved / elapsed * 3600
     logger.info(
         "Crawl cycle done. Visited %d URLs, saved %d pages in %.0fs (%.1f pages/hour). "
-        "Hosts capped: %d, traps flagged: %d, links dropped (queue full): %d.",
+        "Hosts capped: %d, traps flagged: %d, links dropped (queue full): %d, "
+        "media skipped: %d.",
         len(visited),
         state.saved,
         elapsed,
@@ -560,6 +617,7 @@ async def crawl_cycle(weekly: bool = False) -> None:
         len(state.capped_hosts),
         len(state.trapped_hosts),
         state.dropped_links,
+        state.skipped_media,
     )
     if state.run_ceiling_reached():
         logger.warning("Run ceiling hit: stopped at %d pages", MAX_PAGES_PER_RUN)

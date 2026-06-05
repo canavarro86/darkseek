@@ -14,7 +14,13 @@ load_dotenv()
 from flask import Flask, g, jsonify, request
 from flask_cors import CORS
 
-from .models import db_size_mb, get_crawl_stats, get_db
+from .models import (
+    db_size_mb,
+    get_crawl_stats,
+    get_db,
+    get_search_stats,
+    log_search_query,
+)
 from .search import search_pages
 
 logging.basicConfig(
@@ -186,7 +192,7 @@ def search():
         "search qlen=%d category=%s page=%d safe=%s -> %d hits",
         len(query), category, page, safe_mode, total,
     )
-    return jsonify(
+    resp = jsonify(
         {
             "query": query,
             "page": page,
@@ -194,6 +200,22 @@ def search():
             "results": results,
         }
     )
+    # Persist the query for index-quality analysis after the response is built.
+    # log_search_query never raises, so this cannot break or block the response.
+    log_search_query(query, total, safe_mode, category)
+    return resp
+
+
+@app.get("/api/search-stats")
+def search_stats():
+    """Public, no-auth aggregate search stats (popular / zero-result queries).
+
+    Cached for 5 minutes at the edge/browser since the underlying aggregates
+    move slowly and the query is a few cheap grouped counts.
+    """
+    resp = jsonify(get_search_stats())
+    resp.headers["Cache-Control"] = "max-age=300"
+    return resp
 
 
 # --- v2.0 community trust: Proof-of-Work-gated voting / reporting -------------

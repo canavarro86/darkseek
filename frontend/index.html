@@ -714,7 +714,7 @@
   </div>
 
   <div class="stats">
-    indexed:&nbsp;<span class="hi" id="stat-count">—</span>&nbsp;pages&nbsp;·&nbsp;tor:&nbsp;online&nbsp;·&nbsp;latency:&nbsp;~<span class="hi" id="stat-latency">—</span>ms
+    indexed:&nbsp;<span class="hi" id="stat-count">—</span>&nbsp;pages&nbsp;·&nbsp;searches&nbsp;today:&nbsp;<span class="hi" id="stat-searches">—</span>&nbsp;·&nbsp;tor:&nbsp;online&nbsp;·&nbsp;latency:&nbsp;~<span class="hi" id="stat-latency">—</span>ms
   </div>
 
   <div class="filters" id="filters">
@@ -797,6 +797,16 @@
   });
 
   async function loadStats() {
+    // Fire-and-forget: searches-today counter must never block page load and
+    // degrades to "—" if the endpoint fails.
+    fetch('/api/search-stats')
+      .then(r => r.json())
+      .then(data => {
+        const el = document.getElementById('stat-searches');
+        if (el && data.searches_today !== undefined)
+          el.textContent = data.searches_today.toLocaleString();
+      })
+      .catch(() => {});
     try {
       const res = await fetch('/stats');
       if (!res.ok) return;
@@ -868,6 +878,10 @@
         return;
       }
       render(await res.json());
+      // Optimistically bump the searches-today counter for instant feedback.
+      const el = document.getElementById('stat-searches');
+      if (el && el.textContent !== '—')
+        el.textContent = ((parseInt(el.textContent.replace(/,/g, '')) || 0) + 1).toLocaleString();
     } catch (e) {
       showError('Network error — is the API running?', true);
     } finally {
