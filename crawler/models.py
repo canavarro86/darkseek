@@ -5,7 +5,7 @@ from typing import List
 
 # Single, unified DB layer (WAL + pragmas + migrations) lives in api.models.
 # The crawler image bundles api/, so this import works in both processes.
-from api.models import get_db
+from api.models import _column_exists, get_db
 
 logger = logging.getLogger(__name__)
 
@@ -296,6 +296,55 @@ def cleanup_inactive_pages() -> int:
         conn.commit()
     if deleted:
         logger.info("cleanup: deleted %d inactive pages", deleted)
+    return deleted
+
+
+# CSAM keyword blocklist for retroactive purges. Mirrors spider.BLOCKED_KEYWORDS;
+# kept here as a literal (no cross-module import) so the purge is self-contained
+# and can run even if the crawler package layout changes. Lowercase substrings.
+PURGE_KEYWORDS = (
+    'loli', 'lolita', 'pedo', 'pedophil', 'preteen', 'pre-teen',
+    'jailbait', 'childporn', 'child porn', 'cp porn', 'toddlercon',
+    'underage', 'minor porn', 'kids porn', 'kiddie', 'shota', 'shotacon',
+    'sophie webcam', 'tweenfan',
+)
+
+
+def purge_illegal_pages() -> int:
+    """Retroactively delete any indexed CSAM/illegal pages. Idempotent.
+
+    Removes rows whose title or description contains a blocked keyword
+    (case-insensitive substring), plus any row already tagged illegal/csam.
+    Deleting from `pages` fires the pages_ad trigger, so the matching FTS rows
+    are removed in lockstep. Safe to run repeatedly: a clean DB deletes nothing.
+    Returns the total number of rows deleted and logs it.
+    """
+    deleted = 0
+    with get_db() as conn:
+        # Keyword match on title/description. lower() on both sides makes the
+        # LIKE explicit and locale-independent for the ASCII keyword set.
+        keyword_clause = " OR ".join(
+            "lower(title) LIKE ? OR lower(description) LIKE ?"
+            for _ in PURGE_KEYWORDS
+        )
+        params: List[str] = []
+        for keyword in PURGE_KEYWORDS:
+            pattern = f"%{keyword}%"
+            params.extend((pattern, pattern))
+        cur = conn.execute(
+            f"DELETE FROM pages WHERE {keyword_clause}", params
+        )
+        deleted += cur.rowcount
+
+        # Tag-based sweep, guarded: content_tag may not exist on a legacy DB.
+        if _column_exists(conn, "pages", "content_tag"):
+            cur = conn.execute(
+                "DELETE FROM pages WHERE content_tag IN ('illegal', 'csam')"
+            )
+            deleted += cur.rowcount
+
+        conn.commit()
+    logger.warning("purge_illegal_pages: deleted %d illegal pages", deleted)
     return deleted
 
 
