@@ -222,3 +222,10 @@ db/*.db
 *.log
 logs/
 node_modules/
+
+# Claude Code
+.claude/
+
+# Internal project docs (not needed by contributors)
+DARKSEEK_PROJECT.md
+CLAUDE.md
