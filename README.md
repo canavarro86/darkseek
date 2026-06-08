@@ -1,123 +1,164 @@
-# DarkSeek
+# DarkSeek 🧅
 
-> Independent darknet search engine. No ads. No trackers. No censorship.
+> Privacy-first full-text search engine for the Tor network.
+> No ads. No tracking. No censorship. Open source.
 
-**Live:** [37mj2uc7sls76pah7op7xeq7nrskfpircrvycpceyifvwftrxiydubyd.onion](http://37mj2uc7sls76pah7op7xeq7nrskfpircrvycpceyifvwftrxiydubyd.onion)
-**Clearnet:** [http://95.179.142.200](http://95.179.142.200)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://python.org)
+[![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
+
+**Live (Tor):** `37mj2uc7sls76pah7op7xeq7nrskfpircrvycpceyifvwftrxiydubyd.onion`
+**Live (Clearnet):** `http://95.179.142.200`
 
 ---
 
 ## What is DarkSeek
 
-DarkSeek is a full-text search engine for the Tor network. It crawls `.onion` sites, indexes their content using SQLite FTS5, and serves results through a fast API. Everything runs inside Docker on a single 1GB VPS — lean by design.
+DarkSeek is a full-text search engine for the Tor network. It crawls `.onion`
+sites over Tor, categorizes each page with Claude, and indexes the results in
+SQLite FTS5 so they can be searched through a fast, no-logs API. Everything runs
+inside Docker on a single 1GB VPS — lean by design, self-hostable by anyone.
 
 ---
 
-## Release v1.0.0
+## Features
 
-### Infrastructure
-- VPS: Vultr Amsterdam, Debian 12, 1GB RAM, $5/mo
-- All services run via Docker Compose with memory limits
-- Persistent SQLite database at `/opt/darkseek_db/darkseek.db`
-- Tor Hidden Service with permanent `.onion` address (keys backed up)
-- GitHub Actions CI/CD — auto deploy on merge to `main`
-- Branch protection: `main` requires PR approval
-- Daily DB backup via cron, 7-day retention
-- UptimeRobot monitoring with email alerts
-- Server hardening: SSH key-only on port 2020, UFW firewall, fail2ban, unattended-upgrades
-
-### Services (Docker)
-| Container | Image | Memory limit | Purpose |
-|-----------|-------|-------------|---------|
-| `tor` | dperson/torproxy | 120MB | SOCKS5 proxy + Hidden Service |
-| `api` | custom Python | 180MB | FastAPI search backend |
-| `nginx` | nginx:alpine | 32MB | Reverse proxy + static files |
-| `crawler` | custom Python | 256MB | Scrapy spider via Tor |
-
-### Search
-- SQLite FTS5 full-text search with BM25 ranking
-- Russian language support via PyStemmer snowball stemmer
-- OR-fallback for zero-result queries
-- FTS5 injection protection
-- API endpoints: `/api/search`, `/stats`, `/health`, `/metrics`
-- Rate limiting: 10 requests/minute per IP
-- Request deduplication by `content_hash`
-
-### Crawler
-- Scrapy spider over SOCKS5 Tor proxy
-- 5 concurrent workers, 1.5s delay, 10s per-domain throttle
-- Dead site handling with periodic revive checks
-- Forum pagination support
-- Freshness ranking (recently seen pages ranked higher)
-- Scheduled run at 00:00 UTC daily
-
-### AI Integration
-- Claude Haiku (`claude-haiku-4-5`) for page description and categorization
-- Budget cap: $5/month
-- Output: `title`, `description`, `category`, `lang` per page
-- Categories: `forum` | `market` | `news` | `wiki` | `service` | `other`
-
-### Frontend
-- Pure HTML/CSS/JS — zero frameworks, zero dependencies
-- Dark terminal aesthetic: `#0a0a0a` background, `#00ff41` green, monospace font
-- Debounced search input, retry button, keyboard shortcuts
-- Category filter badges
-- Paginated results with dates
-- Submit page for new `.onion` URLs
-
-### Database
-- SQLite WAL mode + PRAGMA optimizations
-- FTS5 virtual table with auto-sync triggers (INSERT / UPDATE / DELETE)
-- Indexes on `last_seen`, `category`, `is_alive`
-- `score` field for future PageRank implementation
-
----
-
-## Release v1.1.0
-
-- Claude API connected (`ai_describe.py`) with $5/mo budget guard
-- Crawler upgraded: 5 workers, per-domain throttling
-- Russian search with PyStemmer snowball + OR-fallback
+- Full-text search via SQLite FTS5 with BM25 ranking
+- Crawler over Tor SOCKS5 (async `httpx`)
+- AI page categorization via Claude Haiku (`claude-haiku-4-5`)
+- Russian language stemming (PyStemmer snowball) with OR-fallback
+- Community voting with Proof-of-Work gate (no accounts, no IPs)
+- Abuse reporting (scam/offline/illegal/spam) with PoW gate
+- Safe mode toggle with one-time adult content warning
+- Onion score (1–5 rating derived from votes)
 - Content deduplication by `content_hash`
-- CI/CD health + search + stats verification after every deploy
+- Search query analytics (no IP, no user data stored)
+- CSAM keyword blocklist (crawler + search)
+- Instant answers: QR, base64, hash, passphrase, calc, ip, shorten
+- Submit / bulk submit `.onion` URLs
+- Dead site handling with exponential back-off
+- Docker Compose, 1GB RAM VPS, ~670MB total memory footprint
+- MIT licensed, self-hostable
 
 ---
 
-## Release v1.2.0 — Hardening & Resilience
+## Architecture
 
-Unattended-operation hardening after the corpus reached ~39.5k pages. Each
-external dependency can now fail without halting or corrupting ingestion.
+```
+Seed URLs (.onion)
+    ↓
+Async httpx crawler (over Tor SOCKS5 :9050)
+    ↓ extract title, text, links
+Parser + AI Describe (Claude Haiku)
+    ↓ {title, description, category, lang}
+SQLite FTS5 (WAL mode)
+    ↓
+Flask API  →  nginx  →  User
+```
 
-### AI enrichment — graceful degradation
-- Two strategies behind one interface: `AIEnricher` (Claude) and
-  `HeuristicEnricher` (local, zero-network).
-- **Circuit breaker:** after 5 consecutive API failures (credit exhaustion / 429
-  / 5xx / timeout) the API is skipped for 15 min and every page is enriched
-  locally; one probe re-closes the circuit on recovery.
-- New `enrichment_method` column (`ai` | `heuristic` | `pending`) replaces
-  NULL-as-state and drives the backfill job. Ingestion never writes NULL
-  `category`/`lang` again.
-- Single `normalize_lang()` source of truth (ISO-639-1, lowercase) used by both
-  enrichers and the migration script.
+Everything runs in Docker Compose on a single 1GB VPS.
 
-### Crawler resilience
-- **Per-host fairness cap:** 200 pages/host/run (BBC had reached 1,603).
-- **Crawl-trap protection:** depth limit 5, global ceiling 10,000 pages/run, and
-  a numeric-pagination trap detector that de-prioritizes runaway hosts.
-- **Dead-onion negative cache** (`dead_onions` table): resolve failures are
-  cached with exponential back-off (7→14→28… days, capped 90), saving ~30s per
-  dead onion per cycle. Revived and cleared on recovery.
+---
 
-### Data hygiene
-- Content dedup enforced by a partial `UNIQUE` index on `content_hash` plus an
-  app-level upsert that bumps `last_seen` instead of inserting a copy.
-- One-shot scripts: `scripts/dedupe.py` (collapse 1,215 historical dupes),
-  `scripts/normalize_lang.py` (canonicalize lang tags), `scripts/reprocess_ai.py`
-  (upgrade `heuristic` rows to `ai` when credits return — resumable, rate-limited).
+## Quick Start
 
-### Memory envelope
-- tor `mem_limit` 120m→180m (+`mem_reservation` 150m); crawler 256m.
-  tor 180 + api 180 + nginx 32 + crawler 256 = **648m / 1024m**.
+```bash
+git clone https://github.com/canavarro86/darkseek.git
+cd darkseek
+cp .env.example .env
+# Edit .env — add your ANTHROPIC_API_KEY
+docker compose up -d
+# Open http://localhost
+```
+
+The crawler service runs continuously, cycling through its queue with a short
+pause between cycles (a full re-crawl, including dead sites, runs weekly on
+Sundays). To trigger a one-off crawl run manually:
+
+```bash
+make crawl
+```
+
+---
+
+## Configuration
+
+| Variable | Description | Default |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | Claude API key for AI categorization | required |
+| `DATABASE_PATH` | Path to SQLite database | `/app/db/darkseek.db` |
+| `TOR_PROXY` | Tor SOCKS5 proxy address | `socks5h://tor:9050` |
+| `CRAWLER_DELAY` | Delay between requests (seconds) | `1.5` |
+| `CRAWLER_WORKERS` | Concurrent crawler workers | `5` |
+| `CORS_ORIGINS` | Allowed CORS origins (comma-separated) | empty (same-origin only) |
+
+---
+
+## API Reference
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/search?q=<query>` | Full-text search |
+| GET | `/api/search-stats` | Aggregate search analytics |
+| GET | `/api/challenge?page_id=<id>` | Mint PoW challenge for voting |
+| POST | `/api/vote` | Cast vote (requires solved PoW) |
+| POST | `/api/report` | Report a page (requires solved PoW) |
+| POST | `/api/submit` | Submit a new `.onion` URL |
+| POST | `/api/submit/bulk` | Bulk submit up to 50 URLs |
+| GET | `/api/lookup?url=<url>` | Check if a URL is indexed |
+| GET | `/api/ip` | Return caller's Tor exit node IP |
+| GET | `/api/shorten?url=<url>` | Shorten a URL via TinyURL |
+| GET | `/stats` | Index statistics |
+| GET | `/metrics` | Crawler operational metrics (internal-only) |
+| GET | `/health` | Health check |
+
+All `/api/` endpoints are rate-limited by nginx (10 req/min per IP). `/metrics`
+is restricted to the internal Docker network.
+
+---
+
+## Project Structure
+
+```
+darkseek/
+├── api/
+│   ├── main.py          # Flask app — all API endpoints
+│   ├── models.py        # SQLite connection, migrations, analytics
+│   ├── search.py        # FTS5 search logic, BM25 ranking
+│   ├── scoring.py       # Onion score calculation
+│   ├── stemmer.py       # Russian PyStemmer integration
+│   ├── synonyms.py      # Search synonym expansion
+│   └── search_parser.py # FTS5 query parser / sanitizer
+├── crawler/
+│   ├── spider.py        # Async httpx crawler over Tor SOCKS5
+│   ├── parser.py        # BeautifulSoup HTML parser
+│   ├── ai_describe.py   # Claude Haiku categorization
+│   ├── models.py        # Crawler DB layer
+│   └── dead_cache.py    # Dead onion negative cache
+├── db/
+│   └── schema.sql       # SQLite schema with FTS5 and triggers
+├── frontend/
+│   ├── index.html       # Main search page
+│   ├── submit.html      # Submit .onion URLs
+│   ├── about.html       # About page
+│   ├── privacy.html     # Privacy policy
+│   ├── donate.html      # Donation page
+│   └── faq.html         # FAQ / instant commands reference
+├── scripts/
+│   ├── purge_illegal.py # One-time CSAM content purge
+│   ├── dedupe.py        # Collapse duplicate content_hash rows
+│   ├── normalize_lang.py# Canonicalize language tags
+│   └── reprocess_ai.py  # Re-enrich heuristic rows with AI
+├── tor/
+│   └── torrc            # Tor daemon config + hidden service
+├── docker-compose.yml
+├── nginx.conf
+├── Makefile
+├── .env.example
+└── .github/
+    └── workflows/
+        └── deploy.yml   # CI/CD: auto-deploy on merge to main
+```
 
 ---
 
@@ -140,58 +181,35 @@ Type directly in the search box:
 
 ---
 
-## Project Structure
+## Memory Footprint
 
 ```
-darkseek/
-├── api/
-│   └── main.py          # FastAPI app — search, stats, health, ip, shorten
-├── crawler/
-│   ├── spider.py        # Scrapy async spider over Tor SOCKS5
-│   ├── parser.py        # BeautifulSoup HTML parser
-│   └── ai_describe.py   # Claude Haiku categorization
-├── db/
-│   └── schema.sql       # SQLite schema with FTS5 and triggers
-├── frontend/
-│   ├── index.html       # Main search page
-│   ├── submit.html      # Submit new .onion URL
-│   ├── donate.html      # Donation page with crypto wallets
-│   └── faq.html         # Commands reference
-├── docker-compose.yml
-├── nginx.conf
-├── CLAUDE.md            # Instructions for Claude Code
-└── README.md
+tor      180 MB
+api      180 MB
+nginx     32 MB
+crawler  280 MB (runs continuously)
+─────────────────
+Total   ~672 MB / 1024 MB
 ```
 
----
-
-## API
-
-```
-GET /api/search?q=<query>&limit=20&offset=0
-GET /api/ip
-GET /api/shorten?url=<url>
-GET /stats
-GET /health
-GET /metrics
-```
+Tested on a $5/mo Vultr VPS (1 vCPU, 1GB RAM, Amsterdam).
 
 ---
 
 ## Roadmap
 
-- [ ] Collect 50k+ indexed pages (seed from ahmia, torch, Daniel's list)
-- [ ] PageRank scoring by `.onion` link graph
-- [ ] Improve category classification (reduce "other")
-- [ ] Domain + HTTPS (darkseek.com + Let's Encrypt)
-- [ ] Donations: XMR/BTC on front page
-- [ ] Promoted listings: paid top placement per category
+- [ ] Reach 50k+ indexed pages (seed from ahmia, Torch, Daniel's list)
+- [ ] PageRank scoring from `.onion` link graph (`score` field ready in schema)
+- [ ] Reduce "other" category — improve AI classification prompts
+- [ ] HTTPS (darkseek.com + Let's Encrypt)
 - [ ] Public API: free tier 100 req/day, paid $20/mo unlimited
+- [ ] Promoted listings: paid top placement per category (XMR/BTC)
+- [ ] Priority indexing: fast-track crawl for submitted URLs (for a fee)
 - [ ] Scale to 4GB RAM server (Hetzner CX22) when needed
 
 ---
 
-## Support
+## Support / Donations
 
 DarkSeek runs on donations. No investors. No ads.
 
@@ -206,6 +224,13 @@ DarkSeek runs on donations. No investors. No ads.
 
 ---
 
+## Privacy
+
+DarkSeek does not log IP addresses, search queries, or any user data.
+See [privacy.html](frontend/privacy.html) for the full policy.
+
+---
+
 ## License
 
-Private repository. All rights reserved.
+MIT — see [LICENSE](LICENSE).
