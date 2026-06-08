@@ -60,6 +60,22 @@ if _cors_origins:
 
 CATEGORIES = {"forum", "market", "news", "wiki", "service", "other"}
 
+# Illegal-content search blocklist (CSAM). A query containing any of these
+# substrings is refused with an empty result set before it ever hits the index.
+# Lowercase substrings; matched against the lowercased, sanitized query.
+BLOCKED_SEARCH_TERMS = frozenset({
+    'loli', 'lolita', 'pedo', 'pedophil', 'preteen', 'pre-teen',
+    'jailbait', 'child porn', 'childporn', 'cp porn', 'toddlercon',
+    'underage porn', 'kids porn', 'kiddie', 'shota', 'shotacon',
+    'tweenfan', 'sophie webcam',
+})
+
+
+def _is_blocked_query(query: str) -> bool:
+    """True if the query contains any blocked CSAM search term (substring)."""
+    lowered = query.lower()
+    return any(term in lowered for term in BLOCKED_SEARCH_TERMS)
+
 # Control characters (incl. NUL) that must never reach the FTS engine or logs.
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 MAX_QUERY_LEN = 200
@@ -169,6 +185,20 @@ def search():
         page = max(1, int(request.args.get("page", 1)))
     except (ValueError, TypeError):
         page = 1
+
+    # Refuse illegal (CSAM) queries before touching the index. Return an empty,
+    # well-formed result set (HTTP 200) so the UI degrades gracefully; log only
+    # the query length, never the raw text (no-logs policy, see /privacy.html).
+    if _is_blocked_query(query):
+        logger.warning("Blocked illegal search query (qlen=%d)", len(query))
+        return jsonify({
+            "query": query,
+            "page": page,
+            "total": 0,
+            "results": [],
+            "blocked": True,
+            "message": "This search is not available.",
+        }), 200
 
     category = request.args.get("category")
     if category and category not in CATEGORIES:

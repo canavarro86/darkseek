@@ -222,6 +222,7 @@ class RunState:
         self.capped_hosts: set[str] = set()          # hosts that hit PER_HOST_CAP (logged once)
         self.dropped_links = 0                        # links dropped on a full queue
         self.skipped_media = 0                        # binary/non-HTML URLs skipped (OOM guard)
+        self.skipped_illegal = 0                      # CSAM-blocklisted URLs/pages skipped
 
     def run_ceiling_reached(self) -> bool:
         return self.saved >= MAX_PAGES_PER_RUN
@@ -291,6 +292,30 @@ def _is_media_url(url: str) -> bool:
     path = urlparse(url).path
     ext = os.path.splitext(path)[1].lower()
     return ext in SKIP_EXTENSIONS
+
+# --- Illegal-content blocklist (CSAM) ---------------------------------------
+# Hard refusal list. A URL whose address — or a fetched page whose title /
+# description — contains any of these substrings is never indexed. Matching is a
+# plain lowercase substring test (cheap, no fetch required for the URL pre-check)
+# so we drop the content before it ever reaches the index or the AI describer.
+BLOCKED_KEYWORDS = frozenset({
+    'loli', 'lolita', 'pedo', 'pedophil', 'preteen', 'pre-teen',
+    'jailbait', 'childporn', 'child porn', 'cp porn', 'toddlercon',
+    'underage', 'minor porn', 'kids porn', 'kiddie', 'shota', 'shotacon',
+    'sophie webcam', 'tweenfan',
+})
+
+
+def _is_blocked_content(title: str, description: str, url: str) -> bool:
+    """True if title, description, or URL contains any blocked CSAM keyword.
+
+    All three fields are folded into one lowercase haystack and tested for any
+    blocked substring. Called twice in the pipeline: with only the URL before a
+    fetch (cheap pre-filter), and with the AI-derived title/description before
+    the page is written to the index.
+    """
+    haystack = f"{title} {description} {url}".lower()
+    return any(keyword in haystack for keyword in BLOCKED_KEYWORDS)
 
 # fetch() outcomes
 FETCH_OK = "ok"        # html returned
@@ -438,6 +463,13 @@ async def worker(
                 logger.debug("Skip media URL: %s", url)
                 continue
 
+            # CSAM blocklist (URL pre-check): never fetch a flagged URL. Not a
+            # dead site — never mark_dead(); just drop it silently and move on.
+            if _is_blocked_content("", "", url):
+                state.skipped_illegal += 1
+                logger.warning("Skip blocked URL (illegal content): %s", url)
+                continue
+
             async with semaphore:
                 await _domain_throttle(url)
                 logger.info("Crawling %s (depth %d)", url, depth)
@@ -462,6 +494,16 @@ async def worker(
 
                 content_hash = hashlib.md5(html.encode()).hexdigest()
                 meta = describe(html, url)
+
+                # CSAM blocklist (content post-check): the AI-derived title /
+                # description can reveal illegal content the URL alone did not.
+                # Drop before upsert so it never reaches the index.
+                if _is_blocked_content(
+                    meta.get("title", ""), meta.get("description", ""), url
+                ):
+                    state.skipped_illegal += 1
+                    logger.warning("Skip blocked page (illegal content): %s", url)
+                    continue
 
                 upsert_page(
                     url=url,
@@ -609,7 +651,7 @@ async def crawl_cycle(weekly: bool = False) -> None:
     logger.info(
         "Crawl cycle done. Visited %d URLs, saved %d pages in %.0fs (%.1f pages/hour). "
         "Hosts capped: %d, traps flagged: %d, links dropped (queue full): %d, "
-        "media skipped: %d.",
+        "media skipped: %d, illegal skipped: %d.",
         len(visited),
         state.saved,
         elapsed,
@@ -618,6 +660,7 @@ async def crawl_cycle(weekly: bool = False) -> None:
         len(state.trapped_hosts),
         state.dropped_links,
         state.skipped_media,
+        state.skipped_illegal,
     )
     if state.run_ceiling_reached():
         logger.warning("Run ceiling hit: stopped at %d pages", MAX_PAGES_PER_RUN)
