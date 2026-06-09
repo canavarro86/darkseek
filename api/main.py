@@ -64,12 +64,27 @@ CATEGORIES = {"forum", "market", "news", "wiki", "service", "other"}
 # substrings is refused with an empty result set before it ever hits the index.
 # Lowercase substrings; matched against the lowercased, sanitized query.
 BLOCKED_SEARCH_TERMS = frozenset({
+    # CSAM — original terms
     'loli', 'lolita', 'pedo', 'pedophil', 'preteen', 'pre-teen',
     'jailbait', 'child porn', 'childporn', 'cp porn', 'toddlercon',
     'underage porn', 'kids porn', 'kiddie', 'shota', 'shotacon',
     'tweenfan', 'sophie webcam',
+    # CSAM — added from real query logs (zero-result CSAM queries observed in production)
+    'kids peeing', 'kids pee', 'kids pic', 'kids photo',
+    'children pic', 'children photo', 'children nude',
+    'young michelle', 'girl pics download michelle',
+    'young girl pic', 'young boy pic',
+    'teen nude', 'teen naked', 'teen xxx',
+    'minor nude', 'minor naked', 'minor porn',
+    'baby nude', 'baby naked',
+    # Illegal goods — from production query logs
+    'sell human kidney', 'buy kidney', 'organ trafficking', 'buy organ',
+    'buy passport', 'fake passport', 'counterfeit passport',
+    'buy id card', 'fake id', 'counterfeit id',
+    'hire hitman', 'kill someone', 'murder for hire',
+    'buy fentanyl', 'buy heroin', 'buy cocaine', 'buy meth',
+    'buy drugs online', 'dark market drugs',
 })
-
 
 def _is_blocked_query(query: str) -> bool:
     """True if the query contains any blocked CSAM search term (substring)."""
