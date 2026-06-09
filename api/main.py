@@ -76,7 +76,14 @@ BLOCKED_SEARCH_TERMS = frozenset({
     'young girl pic', 'young boy pic',
     'teen nude', 'teen naked', 'teen xxx',
     'minor nude', 'minor naked', 'minor porn',
-    'baby nude', 'baby naked', 'sell human kidney'
+    'baby nude', 'baby naked',
+    # Illegal goods — from production query logs
+    'sell human kidney', 'buy kidney', 'organ trafficking', 'buy organ',
+    'buy passport', 'fake passport', 'counterfeit passport',
+    'buy id card', 'fake id', 'counterfeit id',
+    'hire hitman', 'kill someone', 'murder for hire',
+    'buy fentanyl', 'buy heroin', 'buy cocaine', 'buy meth',
+    'buy drugs online', 'dark market drugs',
 })
 
 def _is_blocked_query(query: str) -> bool:
