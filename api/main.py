@@ -83,7 +83,7 @@ BLOCKED_SEARCH_TERMS = frozenset({
     'buy id card', 'fake id', 'counterfeit id',
     'hire hitman', 'kill someone', 'murder for hire',
     'buy fentanyl', 'buy heroin', 'buy cocaine', 'buy meth',
-    'buy drugs online', 'dark market drugs',
+    'buy drugs online', 'dark market drugs', 'buy russian prostitute Marlin'
 })
 
 def _is_blocked_query(query: str) -> bool:
