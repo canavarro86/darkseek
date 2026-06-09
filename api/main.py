@@ -76,7 +76,7 @@ BLOCKED_SEARCH_TERMS = frozenset({
     'young girl pic', 'young boy pic',
     'teen nude', 'teen naked', 'teen xxx',
     'minor nude', 'minor naked', 'minor porn',
-    'baby nude', 'baby naked',
+    'baby nude', 'baby naked', 'sell human kidney'
 })
 
 def _is_blocked_query(query: str) -> bool:
