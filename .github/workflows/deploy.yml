@@ -35,7 +35,20 @@ jobs:
             fi
 
             docker compose up -d --remove-orphans
-            sleep 60
+
+            # Wait for the API to become healthy instead of a blind sleep (FIX 6).
+            # Polls /health every 5s up to 180s; fails the deploy if it never comes up.
+            TIMEOUT=180
+            ELAPSED=0
+            until curl -sf http://localhost/health > /dev/null 2>&1; do
+              sleep 5
+              ELAPSED=$((ELAPSED + 5))
+              if [ $ELAPSED -ge $TIMEOUT ]; then
+                echo "ERROR: Service did not become healthy within ${TIMEOUT}s"
+                exit 1
+              fi
+            done
+            echo "Service is healthy after ${ELAPSED}s"
 
             # --- Health verification ----------------------------------------
             # curl retries while containers settle: 5 attempts, 10s apart, and

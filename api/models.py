@@ -246,6 +246,139 @@ def migrate(conn: sqlite3.Connection) -> None:
     ensure_content_hash_unique_index(conn)
 
 
+# --- Numbered, transactional migrations (FIX 1) -----------------------------
+# The legacy migrate() above is idempotent ADD-COLUMN / CREATE-IF-NOT-EXISTS and
+# stays as the baseline. The v3 changes layer on top as numbered migrations: each
+# runs exactly once, inside its own transaction, and is recorded in
+# schema_migrations. Any error rolls the WHOLE migration back (DDL included) and
+# aborts startup, so a half-applied schema can never reach production.
+#
+# To add a migration: append a @_migration(N, "desc") function. Keep each body
+# guarded (CREATE ... IF NOT EXISTS, _column_exists before ALTER) so re-running
+# against a fresh DB where schema.sql already created the objects is a no-op.
+
+_MIGRATIONS: list = []  # (version:int, description:str, fn)
+
+
+def _migration(version: int, description: str):
+    def _register(fn):
+        _MIGRATIONS.append((version, description, fn))
+        return fn
+    return _register
+
+
+@_migration(1, "v3 self-feeding crawler columns on pages")
+def _migrate_001(conn: sqlite3.Connection) -> None:
+    # Constant-default columns are safe to ALTER ADD directly.
+    if not _column_exists(conn, "pages", "crawl_priority"):
+        conn.execute("ALTER TABLE pages ADD COLUMN crawl_priority INTEGER DEFAULT 5")
+    if not _column_exists(conn, "pages", "crawl_attempts"):
+        conn.execute("ALTER TABLE pages ADD COLUMN crawl_attempts INTEGER DEFAULT 0")
+    # SQLite forbids ALTER ADD COLUMN with a CURRENT_TIMESTAMP default, so add it
+    # nullable. We deliberately do NOT backfill it: the crawler treats a NULL
+    # next_crawl_at as "eligible now" everywhere it reads it, so existing rows are
+    # immediately crawlable. (A backfill UPDATE would also fire the pages_fts
+    # update trigger across the whole table for no functional gain.)
+    if not _column_exists(conn, "pages", "next_crawl_at"):
+        conn.execute("ALTER TABLE pages ADD COLUMN next_crawl_at TIMESTAMP")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_next_crawl ON pages(next_crawl_at)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pages_crawl_priority ON pages(crawl_priority)"
+    )
+
+
+@_migration(2, "rate_limits table (per-endpoint throttling)")
+def _migrate_002(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS rate_limits (
+            key          TEXT NOT NULL,
+            window_start TIMESTAMP NOT NULL,
+            count        INTEGER DEFAULT 1,
+            PRIMARY KEY (key, window_start)
+        )
+        """
+    )
+
+
+@_migration(3, "url_cache table (persistent shortener cache)")
+def _migrate_003(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS url_cache (
+            original_url TEXT PRIMARY KEY,
+            short_url    TEXT NOT NULL,
+            created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+
+@_migration(4, "daily_visitors table (unique visitor tracking)")
+def _migrate_004(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS daily_visitors (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            date     TEXT NOT NULL,
+            ip_hash  TEXT NOT NULL,
+            UNIQUE(date, ip_hash)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_daily_visitors_date ON daily_visitors(date)"
+    )
+
+
+def run_numbered_migrations(conn: sqlite3.Connection) -> None:
+    """Apply any not-yet-applied numbered migrations, each in its own transaction.
+
+    Switches the connection to manual transaction control so DDL (CREATE/ALTER)
+    is included in the rollback envelope — SQLite supports transactional DDL, but
+    Python's sqlite3 only auto-opens transactions for DML. On any failure the
+    migration is rolled back whole and the exception re-raised to abort startup.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version     INTEGER PRIMARY KEY,
+            applied_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            description TEXT
+        )
+        """
+    )
+    conn.commit()
+    applied = {
+        r["version"] for r in conn.execute("SELECT version FROM schema_migrations").fetchall()
+    }
+
+    prev_isolation = conn.isolation_level
+    conn.isolation_level = None  # manual BEGIN/COMMIT/ROLLBACK around DDL+DML
+    try:
+        for version, description, fn in sorted(_MIGRATIONS):
+            if version in applied:
+                continue
+            try:
+                conn.execute("BEGIN")
+                fn(conn)
+                conn.execute(
+                    "INSERT INTO schema_migrations (version, description) VALUES (?, ?)",
+                    (version, description),
+                )
+                conn.execute("COMMIT")
+                logger.info("migration %d applied: %s", version, description)
+            except Exception:
+                conn.execute("ROLLBACK")
+                logger.exception(
+                    "migration %d failed (%s); rolled back, aborting startup",
+                    version, description,
+                )
+                raise
+    finally:
+        conn.isolation_level = prev_isolation
+
+
 def init_db() -> None:
     """Create the schema if missing, then apply migrations."""
     schema_path = os.path.join(os.path.dirname(__file__), "..", "db", "schema.sql")
@@ -255,6 +388,25 @@ def init_db() -> None:
                 conn.executescript(f.read())
         migrate(conn)
         conn.commit()
+        # v3 numbered migrations run after the legacy idempotent pass.
+        run_numbered_migrations(conn)
+
+
+def get_visitor_stats() -> dict:
+    """Distinct-visitor counts for today and yesterday (PART C).
+
+    Distinct visitors == number of daily_visitors rows for that date (the
+    UNIQUE(date, ip_hash) constraint already collapses repeats). Privacy: this
+    reads only opaque daily-salted hashes; no raw IP is stored or returned.
+    """
+    with get_db() as conn:
+        today = conn.execute(
+            "SELECT COUNT(*) FROM daily_visitors WHERE date = date('now')"
+        ).fetchone()[0]
+        yesterday = conn.execute(
+            "SELECT COUNT(*) FROM daily_visitors WHERE date = date('now', '-1 day')"
+        ).fetchone()[0]
+    return {"visitors_today": today, "visitors_yesterday": yesterday}
 
 
 def record_crawl_stats(

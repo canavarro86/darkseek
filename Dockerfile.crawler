@@ -11,6 +11,7 @@ COPY requirements.crawler.txt .
 RUN pip install --no-cache-dir -r requirements.crawler.txt
 
 COPY api/     ./api/
+COPY config/  ./config/
 COPY crawler/ ./crawler/
 COPY scripts/ ./scripts/
 COPY db/schema.sql /app/schema.sql
