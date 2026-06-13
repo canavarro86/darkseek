@@ -1,11 +1,27 @@
-"""Async TOR crawler for .onion sites.
+"""Async TOR crawler for .onion sites — self-feeding from the database (v3).
 
-Tuned config (env-overridable):
-  CRAWLER_WORKERS=5     parallel workers
-  CRAWLER_DELAY=1.5     seconds a worker waits after saving a page
-  QUEUE_IDLE_TIMEOUT=60 seconds a worker waits on an empty queue before exiting
-Plus a per-domain rate limit of 1 request / 10s so 5 workers don't hammer a
-single onion.
+The crawler no longer rebuilds a frontier from SEED_URLS every cycle. Instead it
+runs one continuous loop:
+
+  1. Pull a priority-tiered batch of URLs from the DB (crawler.models.get_next_batch):
+       tier 1  never crawled            (last_seen IS NULL)        limit 100
+       tier 2  alive, stale  > 7 days                              limit 50
+       tier 3  dead, < 3 attempts, cooled down                     limit 20
+     plus any user-submitted URLs claimed from crawl_queue.
+  2. Crawl the batch with CRAWLER_WORKERS concurrent fetches.
+  3. On success: accumulate the result and flush every BATCH_WRITE_SIZE rows in
+     one transaction; extract .onion links and insert NEW ones as never-crawled
+     rows (last_seen NULL) so the NEXT batch's tier 1 picks them up — this is the
+     self-feeding mechanism.
+  4. On failure: mark dead, bump crawl_attempts, push next_crawl_at out by
+     attempts * 3 days (exponential-style back-off). The row is never removed.
+  5. When every tier returns empty, sleep EMPTY_QUEUE_SLEEP and retry.
+
+SEED_URLS are used ONLY to bootstrap a completely empty DB (first run / server
+migration). Config (env-overridable):
+  CRAWLER_WORKERS=2     parallel fetches (keep low: 1GB box)
+  CRAWLER_DELAY=3       seconds a worker waits after saving a page
+Plus a per-domain rate limit of 1 request / 10s.
 """
 
 import asyncio
@@ -15,8 +31,8 @@ import os
 import re
 import sys
 import time
-from collections import Counter, OrderedDict
-from datetime import datetime, timedelta, timezone
+from collections import Counter
+from datetime import datetime, timezone
 from typing import Tuple
 from urllib.parse import urlparse
 
@@ -28,19 +44,21 @@ load_dotenv()
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from api.models import record_crawl_stats
+from config.blocked import BLOCKED_KEYWORDS
 from crawler.ai_describe import describe
-from crawler.dead_cache import clear_dead, is_dead, record_dead, revive_candidates
+from crawler.dead_cache import clear_dead, is_dead, record_dead
 from crawler.models import (
     checkpoint_wal,
     claim_queue_batch,
     cleanup_inactive_pages,
-    get_crawl_urls,
-    mark_dead,
+    count_pages,
+    get_next_batch,
+    insert_discovered_links,
+    normalize_url,
     reconcile_queue,
-    requeue_pending,
-    revive_check,
-    should_recrawl,
-    upsert_page,
+    record_crawl_failure,
+    record_crawl_skip,
+    write_crawl_batch,
 )
 from crawler.parser import parse_page
 
@@ -48,57 +66,21 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 TOR_PROXY = os.environ.get("TOR_PROXY", "socks5h://tor:9050")
-CRAWLER_DELAY = float(os.environ.get("CRAWLER_DELAY", "1.5"))
-CRAWLER_WORKERS = int(os.environ.get("CRAWLER_WORKERS", "5"))
-# Seconds to pause between back-to-back crawl cycles. Set low (e.g. 30) for
-# continuous indexing; the default keeps the queue from being hammered empty.
-CYCLE_SLEEP = float(os.environ.get("CYCLE_SLEEP", "30"))
-QUEUE_IDLE_TIMEOUT = 60
+# Low defaults for a 1GB box (CONCURRENT_REQUESTS=2 / DOWNLOAD_DELAY=3 intent).
+CRAWLER_DELAY = float(os.environ.get("CRAWLER_DELAY", "3"))
+CRAWLER_WORKERS = int(os.environ.get("CRAWLER_WORKERS", "2"))
+# Seconds to sleep when every refill tier is empty before retrying (PART A tier 4).
+EMPTY_QUEUE_SLEEP = float(os.environ.get("EMPTY_QUEUE_SLEEP", "60"))
+# Batch DB writes: accumulate this many successful results, then write once.
+BATCH_WRITE_SIZE = int(os.environ.get("BATCH_WRITE_SIZE", "10"))
 
 # --- Memory bounds (1GB box, crawler budget 256MB) --------------------------
-# Hard ceilings on the two structures that would otherwise grow with the link
-# graph rather than with the page cap, plus an RSS watchdog as the backstop.
-VISITED_MAX = 50_000            # max URLs tracked for dedup; LRU eviction past this
-QUEUE_MAX = 10_000              # max pending frontier items; overflow links dropped
 RSS_LIMIT_MB = 250.0            # restart the crawler if RSS exceeds this
 WATCHDOG_INTERVAL = 15.0        # seconds between RSS checks
-WAL_CHECKPOINT_INTERVAL = 1000  # checkpoint the WAL every N saved pages
-
-
-class BoundedVisited:
-    """Visited-URL membership set with a hard cap and LRU eviction.
-
-    The per-cycle visited set would otherwise grow with every URL dequeued
-    (pages *and* all their extracted links), unbounded by MAX_PAGES_PER_RUN.
-    Cap it at VISITED_MAX; when full, evict the least-recently-added URL. An
-    evicted URL may be re-crawled later, which is an acceptable trade for a
-    bounded footprint on a 1GB box.
-    """
-
-    def __init__(self, maxsize: int = VISITED_MAX) -> None:
-        self._maxsize = maxsize
-        self._data: "OrderedDict[str, None]" = OrderedDict()
-
-    def __contains__(self, url: str) -> bool:
-        return url in self._data
-
-    def add(self, url: str) -> None:
-        if url in self._data:
-            return
-        self._data[url] = None
-        if len(self._data) > self._maxsize:
-            self._data.popitem(last=False)  # evict oldest
-
-    def __len__(self) -> int:
-        return len(self._data)
 
 
 def _rss_mb() -> float | None:
-    """Resident set size of this process in MiB, or None if unavailable.
-
-    Reads /proc/self/status (present in the Linux container). Returns None off
-    Linux or on any read error so the watchdog simply no-ops instead of raising.
-    """
+    """Resident set size of this process in MiB, or None if unavailable."""
     try:
         with open("/proc/self/status") as f:
             for line in f:
@@ -112,10 +94,8 @@ def _rss_mb() -> float | None:
 async def memory_watchdog() -> None:
     """Restart the crawler if its RSS exceeds RSS_LIMIT_MB.
 
-    Runs for the whole process lifetime (including between cycles). On breach it
-    checkpoints the WAL so no indexed pages are stranded, then exits non-zero so
-    Docker's restart policy brings up a clean process. This is the backstop for
-    the bounded queue/visited set above.
+    On breach it checkpoints the WAL so no indexed pages are stranded, then exits
+    non-zero so Docker's restart policy brings up a clean process.
     """
     while True:
         await asyncio.sleep(WATCHDOG_INTERVAL)
@@ -134,19 +114,15 @@ async def memory_watchdog() -> None:
                 logger.exception("Watchdog WAL checkpoint failed")
             os._exit(1)
 
+
 # Per-domain rate limit: never hit the same .onion more than once per 10s, even
-# with multiple concurrent workers. Maps domain -> monotonic time of its next
-# allowed request.
+# with multiple concurrent workers. Maps domain -> monotonic next-allowed time.
 DOMAIN_RATE_LIMIT = 10.0
 _domain_last_seen: dict[str, float] = {}
 
 
 async def _domain_throttle(url: str) -> None:
-    """Sleep so the URL's domain is hit at most once per DOMAIN_RATE_LIMIT secs.
-
-    Reserves the slot before sleeping so concurrent workers targeting the same
-    domain serialize instead of all firing at once.
-    """
+    """Sleep so the URL's domain is hit at most once per DOMAIN_RATE_LIMIT secs."""
     domain = urlparse(url).netloc
     now = time.monotonic()
     last = _domain_last_seen.get(domain, 0.0)
@@ -156,6 +132,9 @@ async def _domain_throttle(url: str) -> None:
     if wait > 0:
         await asyncio.sleep(wait)
 
+
+# Fallback seeds — used ONLY when the DB is empty (first run / fresh migration).
+# Never consulted while the DB has any pages; the crawler self-feeds from links.
 SEED_URLS = [
     "https://www.bbcnewsd73hkzno2ini43t4gblxvycyac5aw4gnv7t2rccijh7745uqd.onion/",
     "https://www.nytimesn7cgmftshazwhfgzm37qxb44r64ytbb2dj3x62d2lljsciiyd.onion/",
@@ -172,31 +151,18 @@ SEED_URLS = [
     "https://www.bbcweb3hytmzhn5d532owbu6oqadra5z3ar726vq5kgwwn6aucdccrad.onion/learningenglish/",
 ]
 
-# --- Bounded-execution limits (crawl-trap & runaway protection) -------------
-# Every value is a deliberate ceiling so an unattended run can't grow without
-# bound (memory) or loop forever (a paginating marketplace ate a whole cycle).
-#
-# MAX_DEPTH: links are followed at most 5 hops from a seed. News/wiki content is
-#   reachable within a few hops; beyond that is mostly low-value pagination.
-# MAX_PAGES_PER_RUN: hard stop at 10k saved pages/run. At ~1.5s/page that is a
-#   multi-hour cycle — enough to make progress, bounded enough to release memory.
-# PER_HOST_CAP: 200 pages/host/run. One host (BBC) had reached 1,603 pages (4%
-#   of the index); 200 keeps any single site from dominating search results.
-# TRAP_NUMERIC_THRESHOLD: >100 URLs from one host that differ only by a numeric
-#   path/query segment (…/category/1.html, /2.html, …) flags pagination-trap
-#   behaviour; that host's numeric links are then de-prioritized (dropped).
-MAX_DEPTH = 5
-MAX_PAGES_PER_RUN = 10_000
+# --- Per-host fairness / trap protection ------------------------------------
+# PER_HOST_CAP bounds how many pages from one host a single batch will save, so
+# one large site can't dominate. TRAP_NUMERIC_THRESHOLD flags pagination traps
+# (>100 URLs from a host differing only by a numeric segment) so their numeric
+# links are dropped from discovery.
 PER_HOST_CAP = 200
 TRAP_NUMERIC_THRESHOLD = 100
-
-# Matches a run of digits in a URL path/query so /category/12.html and
-# /category/13.html collapse to the same template /category/#.html.
 _NUMERIC_SEG_RE = re.compile(r"\d+")
 
 
 def _host(url: str) -> str:
-    """Authority component (scheme-stripped host[:port]) used for per-host caps."""
+    """Authority component (host[:port]) used for per-host caps."""
     return urlparse(url).netloc
 
 
@@ -207,25 +173,20 @@ def _numeric_template(url: str) -> str:
 
 
 class RunState:
-    """Per-cycle, in-memory bookkeeping for the bounded-crawl invariants.
+    """Per-batch, in-memory bookkeeping (host caps, trap detection, counters).
 
-    Not persisted — every cycle starts clean. All counters are bounded by the
-    number of distinct hosts/templates encountered, which the caps above keep
-    small, so this never grows without limit.
+    Not persisted — every batch starts clean. Bounded by the number of distinct
+    hosts/templates in the batch, which the caps above keep small.
     """
 
     def __init__(self) -> None:
-        self.saved = 0                              # pages written this run
-        self.host_pages: Counter = Counter()        # host -> pages saved
-        self.host_templates: dict[str, Counter] = {}  # host -> template -> count
-        self.trapped_hosts: set[str] = set()         # hosts flagged as traps
-        self.capped_hosts: set[str] = set()          # hosts that hit PER_HOST_CAP (logged once)
-        self.dropped_links = 0                        # links dropped on a full queue
-        self.skipped_media = 0                        # binary/non-HTML URLs skipped (OOM guard)
-        self.skipped_illegal = 0                      # CSAM-blocklisted URLs/pages skipped
-
-    def run_ceiling_reached(self) -> bool:
-        return self.saved >= MAX_PAGES_PER_RUN
+        self.saved = 0
+        self.host_pages: Counter = Counter()
+        self.host_templates: dict[str, Counter] = {}
+        self.trapped_hosts: set[str] = set()
+        self.capped_hosts: set[str] = set()
+        self.skipped_media = 0
+        self.skipped_illegal = 0
 
     def host_capped(self, host: str) -> bool:
         return self.host_pages[host] >= PER_HOST_CAP
@@ -252,13 +213,11 @@ class RunState:
 
 
 MAX_RETRIES = 3
-# Base delay for the exponential backoff between connection retries (seconds):
-# attempt 0 waits 2s, attempt 1 waits 4s, ...
+# Base delay for exponential backoff between connection retries: 2s, 4s, ...
 RETRY_BACKOFF_BASE = 2
 
 # Tor circuits are slow to build but reads should not hang forever. Split the
-# connect budget from the read budget so a dead peer fails fast while a slow
-# (but live) onion still gets time to respond.
+# connect budget from the read budget so a dead peer fails fast.
 HTTP_TIMEOUT = httpx.Timeout(connect=15.0, read=30.0, write=15.0, pool=15.0)
 
 # Endpoint used to confirm the request actually egresses through Tor.
@@ -266,13 +225,10 @@ TOR_CHECK_URL = "https://check.torproject.org/api/ip"
 TOR_VERIFY_RETRIES = 5
 TOR_VERIFY_BACKOFF = 5
 
-# HTTP statuses that mean "temporarily unavailable", not "dead". Never mark a
-# site dead on these — it's rate limiting / overload, not a missing service.
+# HTTP statuses that mean "temporarily unavailable", not "dead".
 TRANSIENT_STATUSES = {403, 429, 503}
 
-# Binary/non-HTML extensions the crawler must never download. Pulling a .mp4 or
-# .iso into memory over Tor is the OOM path that gets the container killed
-# (RSS > budget). Cheap extension check first, HEAD Content-Type probe second.
+# Binary/non-HTML extensions the crawler must never download (OOM guard over Tor).
 SKIP_EXTENSIONS = frozenset({
     '.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.ico', '.bmp', '.tiff',
     '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt',
@@ -293,29 +249,17 @@ def _is_media_url(url: str) -> bool:
     ext = os.path.splitext(path)[1].lower()
     return ext in SKIP_EXTENSIONS
 
-# --- Illegal-content blocklist (CSAM) ---------------------------------------
-# Hard refusal list. A URL whose address — or a fetched page whose title /
-# description — contains any of these substrings is never indexed. Matching is a
-# plain lowercase substring test (cheap, no fetch required for the URL pre-check)
-# so we drop the content before it ever reaches the index or the AI describer.
-BLOCKED_KEYWORDS = frozenset({
-    'loli', 'lolita', 'pedo', 'pedophil', 'preteen', 'pre-teen',
-    'jailbait', 'childporn', 'child porn', 'cp porn', 'toddlercon',
-    'underage', 'minor porn', 'kids porn', 'kiddie', 'shota', 'shotacon',
-    'sophie webcam', 'tweenfan',
-})
-
 
 def _is_blocked_content(title: str, description: str, url: str) -> bool:
     """True if title, description, or URL contains any blocked CSAM keyword.
 
-    All three fields are folded into one lowercase haystack and tested for any
-    blocked substring. Called twice in the pipeline: with only the URL before a
-    fetch (cheap pre-filter), and with the AI-derived title/description before
-    the page is written to the index.
+    The keyword list is the single source of truth in config/blocked.py. Called
+    twice in the pipeline: with only the URL before a fetch (cheap pre-filter),
+    and with the AI-derived title/description before a page is written.
     """
     haystack = f"{title} {description} {url}".lower()
     return any(keyword in haystack for keyword in BLOCKED_KEYWORDS)
+
 
 # fetch() outcomes
 FETCH_OK = "ok"        # html returned
@@ -324,12 +268,7 @@ FETCH_SKIP = "skip"    # HTTP error / transient -> caller skips, no mark_dead
 
 
 async def verify_tor(client: httpx.AsyncClient) -> bool:
-    """Confirm the proxy is up and traffic egresses through Tor.
-
-    Retries with linear backoff because the tor container may still be building
-    its first circuit when the crawler starts. Logs the exit IP so operators can
-    confirm the circuit in the logs. Returns False if Tor never becomes ready.
-    """
+    """Confirm the proxy is up and traffic egresses through Tor."""
     for attempt in range(1, TOR_VERIFY_RETRIES + 1):
         try:
             r = await client.get(TOR_CHECK_URL, timeout=HTTP_TIMEOUT)
@@ -337,8 +276,7 @@ async def verify_tor(client: httpx.AsyncClient) -> bool:
             data = r.json()
             logger.info(
                 "Tor circuit ready: exit IP %s (IsTor=%s)",
-                data.get("IP"),
-                data.get("IsTor"),
+                data.get("IP"), data.get("IsTor"),
             )
             return True
         except Exception as e:
@@ -355,10 +293,8 @@ async def fetch(client: httpx.AsyncClient, url: str) -> Tuple[str | None, str]:
 
     Returns (html, outcome):
       - (text, FETCH_OK)   on success
-      - (None, FETCH_DEAD) only on connection-level failure (ConnectError /
-                           TimeoutException) — the caller may mark the site dead
-      - (None, FETCH_SKIP) on any HTTP status error (incl. 403/429/503) or other
-                           error — transient/not-dead, caller just skips
+      - (None, FETCH_DEAD) only on connection-level failure (caller may mark dead)
+      - (None, FETCH_SKIP) on any HTTP status error or other transient error
     """
     # 1) Extension fast-path: never even open a known binary asset.
     if _is_media_url(url):
@@ -366,23 +302,17 @@ async def fetch(client: httpx.AsyncClient, url: str) -> Tuple[str | None, str]:
         return None, FETCH_SKIP
 
     # 2) HEAD probe: reject non-text Content-Type before pulling a body into RAM.
-    #    HEAD failures are non-fatal — a 405 (method not allowed) or a timeout
-    #    just falls through to the normal GET below. Never mark_dead() here; a
-    #    binary file or a HEAD-hostile server is not a dead site.
+    #    HEAD failures are non-fatal — a 405 or a timeout falls through to GET.
     try:
         head = await client.head(url, timeout=HEAD_TIMEOUT, follow_redirects=True)
         if head.status_code != 405:
             content_type = head.headers.get("content-type", "")
-            # Only skip on a *known* non-text type; an empty/unknown type falls
-            # through to GET so we never drop real HTML on a quirky server.
             if content_type and not content_type.startswith("text/"):
                 logger.debug("Skip non-HTML [%s]: %s", content_type, url)
                 return None, FETCH_SKIP
     except (httpx.ConnectError, httpx.TimeoutException):
-        # Circuit slow or HEAD unsupported: don't block, let GET decide.
         pass
     except Exception:
-        # Any other HEAD hiccup is non-fatal — proceed to GET.
         pass
 
     for attempt in range(MAX_RETRIES):
@@ -399,307 +329,237 @@ async def fetch(client: httpx.AsyncClient, url: str) -> Tuple[str | None, str]:
             return None, FETCH_SKIP
         except (httpx.ConnectError, httpx.TimeoutException) as e:
             # Connection-level failure: retry with exponential backoff
-            # (2s, 4s, 8s ...) so a struggling circuit gets progressively more
-            # breathing room; if it still fails, the site is treated as dead.
+            # (2s, 4s, 8s ...); if it still fails, the site is treated as dead.
             if attempt < MAX_RETRIES - 1:
                 await asyncio.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
             else:
-                logger.warning("Connection failed after %d attempts: %s — %s", MAX_RETRIES, url, e)
+                logger.warning(
+                    "Connection failed after %d attempts: %s — %s", MAX_RETRIES, url, e
+                )
                 return None, FETCH_DEAD
         except Exception as e:
-            # Anything else (proxy hiccup, malformed response): skip, don't kill.
             logger.warning("Fetch error (skipping): %s — %s", url, e)
             return None, FETCH_SKIP
     return None, FETCH_DEAD
 
 
-async def worker(
-    queue: asyncio.Queue,
-    visited: BoundedVisited,
-    semaphore: asyncio.Semaphore,
+async def _process_url(
     client: httpx.AsyncClient,
+    url: str,
     state: RunState,
+    results: list,
+    discovered: set,
+    flush_lock: asyncio.Lock,
 ) -> None:
-    while True:
-        try:
-            url, depth = await asyncio.wait_for(queue.get(), timeout=QUEUE_IDLE_TIMEOUT)
-        except asyncio.TimeoutError:
-            logger.info("Worker idle for %ds, exiting", QUEUE_IDLE_TIMEOUT)
+    """Crawl one URL: fetch -> parse -> enrich -> accumulate result + links.
+
+    Writes are buffered into `results` (flushed in batches under flush_lock).
+    Discovered .onion links are collected into `discovered` for one DB insert at
+    batch end (the self-feeding step). Every terminal state updates the DB so the
+    URL leaves the never-crawled tier and can't be re-fetched in a tight loop.
+    """
+    host = _host(url)
+    if state.host_capped(host):
+        if host not in state.capped_hosts:
+            state.capped_hosts.add(host)
+            logger.info("[HOST CAP] %s reached %d", host, PER_HOST_CAP)
+        return
+
+    # Negative cache: skip onions known-dead and still within cooldown.
+    if is_dead(url):
+        logger.debug("Skip dead-cached onion: %s", url)
+        return
+
+    # Media fast-path: not a dead site, just defer it.
+    if _is_media_url(url):
+        state.skipped_media += 1
+        record_crawl_skip(url)
+        return
+
+    # CSAM blocklist (URL pre-check): never fetch; defer so it leaves tier 1.
+    if _is_blocked_content("", "", url):
+        state.skipped_illegal += 1
+        logger.warning("Skip blocked URL (illegal content): %s", url)
+        record_crawl_skip(url)
+        return
+
+    await _domain_throttle(url)
+    logger.info("Crawling %s", url)
+    html, outcome = await fetch(client, url)
+
+    if html is None:
+        # Connection-level failure -> dead cache + crawl failure (back-off).
+        # HTTP 403/429/503 are transient -> defer, don't penalize as dead.
+        if outcome == FETCH_DEAD:
+            record_dead(url)
+            record_crawl_failure(url)
+        else:
+            record_crawl_skip(url)
+        return
+
+    # Reachable again: drop any stale dead-cache entry.
+    clear_dead(url)
+
+    parsed = parse_page(html, url)
+    if parsed is None:
+        logger.debug("Thin page, deferring: %s", url)
+        record_crawl_skip(url)
+        return
+
+    content_hash = hashlib.md5(html.encode()).hexdigest()
+    meta = describe(html, url)
+
+    # CSAM blocklist (content post-check): AI title/description can reveal what
+    # the URL alone did not. Drop before write; defer so it leaves tier 1.
+    if _is_blocked_content(meta.get("title", ""), meta.get("description", ""), url):
+        state.skipped_illegal += 1
+        logger.warning("Skip blocked page (illegal content): %s", url)
+        record_crawl_skip(url)
+        return
+
+    record = {
+        "url": url,
+        "title": meta.get("title") or parsed["title"],
+        "description": meta.get("description") or "",
+        "category": meta.get("category") or "other",
+        "lang": meta.get("lang") or "other",
+        "score": 0.0,
+        "content_hash": content_hash,
+        "page_type": parsed.get("page_type", "other"),
+        "enrichment_method": meta.get("enrichment_method", "heuristic"),
+        "content_tag": meta.get("content_tag", "unknown"),
+    }
+
+    async with flush_lock:
+        results.append(record)
+        state.note_saved(host)
+        logger.info("Queued for write: [%s] %s", record["category"], record["title"][:80])
+
+        # Collect discovered .onion links for the next batch (self-feeding).
+        for link in parsed["links"]:
+            if state.host_capped(_host(link)):
+                continue
+            if state.is_trap_link(link):
+                continue
+            if _is_blocked_content("", "", link):
+                continue
+            discovered.add(link)
+
+        # Batch DB writes: flush once we've accumulated BATCH_WRITE_SIZE rows.
+        if len(results) >= BATCH_WRITE_SIZE:
+            snapshot = results[:]
+            results.clear()
+            write_crawl_batch(snapshot)
+
+    await asyncio.sleep(CRAWLER_DELAY)
+
+
+async def crawl_batch(client: httpx.AsyncClient, batch: list, state: RunState) -> None:
+    """Crawl one batch with CRAWLER_WORKERS concurrent fetches.
+
+    Buffers successful writes (flushed in batches), then writes any remainder and
+    inserts all newly-discovered links in one shot at the end.
+    """
+    visited: set = set()
+    results: list = []
+    discovered: set = set()
+    flush_lock = asyncio.Lock()
+    sem = asyncio.Semaphore(CRAWLER_WORKERS)
+
+    async def handle(url: str) -> None:
+        if url in visited:
             return
+        visited.add(url)
+        async with sem:
+            try:
+                await _process_url(client, url, state, results, discovered, flush_lock)
+            except Exception:
+                logger.exception("Worker error processing %s", url)
 
-        try:
-            # Global run ceiling: stop doing work once we've saved enough. We keep
-            # draining the queue (cheaply) so task_done balances and gather ends.
-            if state.run_ceiling_reached():
-                continue
+    await asyncio.gather(*(handle(u) for u in batch))
 
-            if url in visited:
-                continue
-            visited.add(url)
+    # Flush any results below the batch threshold.
+    if results:
+        write_crawl_batch(results)
 
-            host = _host(url)
-
-            # Per-host fairness cap: once a host hits PER_HOST_CAP we stop
-            # crawling it entirely for the rest of the run.
-            if state.host_capped(host):
-                if host not in state.capped_hosts:
-                    state.capped_hosts.add(host)
-                    logger.info("[HOST CAP] %s reached %d", host, PER_HOST_CAP)
-                continue
-
-            # Negative cache: skip onions known-dead and still within cooldown.
-            if is_dead(url):
-                logger.debug("Skip dead-cached onion: %s", url)
-                continue
-
-            if not should_recrawl(url):
-                logger.debug("Skip fresh URL: %s", url)
-                continue
-
-            # Media fast-path: skip binary assets before spending a throttle slot
-            # or a Tor circuit on them. Not a dead site — never mark_dead().
-            if _is_media_url(url):
-                state.skipped_media += 1
-                logger.debug("Skip media URL: %s", url)
-                continue
-
-            # CSAM blocklist (URL pre-check): never fetch a flagged URL. Not a
-            # dead site — never mark_dead(); just drop it silently and move on.
-            if _is_blocked_content("", "", url):
-                state.skipped_illegal += 1
-                logger.warning("Skip blocked URL (illegal content): %s", url)
-                continue
-
-            async with semaphore:
-                await _domain_throttle(url)
-                logger.info("Crawling %s (depth %d)", url, depth)
-                html, outcome = await fetch(client, url)
-
-                if html is None:
-                    # Connection-level failures count toward dead-marking AND the
-                    # negative cache; HTTP 403/429/503 are transient -> skip only.
-                    if outcome == FETCH_DEAD:
-                        mark_dead(url)
-                        record_dead(url)
-                    continue
-
-                # Reachable again: drop any stale dead-cache entry.
-                clear_dead(url)
-
-                parsed = parse_page(html, url)
-
-                if parsed is None:
-                    logger.debug("Skipping thin page: %s", url)
-                    continue
-
-                content_hash = hashlib.md5(html.encode()).hexdigest()
-                meta = describe(html, url)
-
-                # CSAM blocklist (content post-check): the AI-derived title /
-                # description can reveal illegal content the URL alone did not.
-                # Drop before upsert so it never reaches the index.
-                if _is_blocked_content(
-                    meta.get("title", ""), meta.get("description", ""), url
-                ):
-                    state.skipped_illegal += 1
-                    logger.warning("Skip blocked page (illegal content): %s", url)
-                    continue
-
-                upsert_page(
-                    url=url,
-                    title=meta.get("title") or parsed["title"],
-                    description=meta.get("description") or "",
-                    category=meta.get("category") or "other",
-                    lang=meta.get("lang") or "other",
-                    score=0.0,
-                    content_hash=content_hash,
-                    page_type=parsed.get("page_type", "other"),
-                    enrichment_method=meta.get("enrichment_method", "heuristic"),
-                    content_tag=meta.get("content_tag", "unknown"),
-                )
-                state.note_saved(host)
-                logger.info("Saved: [%s] %s", meta["category"], meta["title"][:80])
-
-                # Periodically truncate the WAL so the -wal sidecar can't grow
-                # without bound across a long continuous cycle.
-                if state.saved % WAL_CHECKPOINT_INTERVAL == 0:
-                    try:
-                        checkpoint_wal()
-                        logger.info("WAL checkpoint at %d saved pages", state.saved)
-                    except Exception:
-                        logger.exception("Periodic WAL checkpoint failed")
-
-                # Enqueue children unless we're at the depth limit. Depth caps
-                # how far we wander from a seed and starves pagination traps.
-                if depth < MAX_DEPTH and not state.run_ceiling_reached():
-                    for link in parsed["links"]:
-                        if link in visited:
-                            continue
-                        link_host = _host(link)
-                        if state.host_capped(link_host):
-                            continue
-                        # Drop numeric-pagination links from trap-flagged hosts;
-                        # is_trap_link also updates the per-host variant counter.
-                        if state.is_trap_link(link):
-                            continue
-                        # Bounded frontier: if the queue is at QUEUE_MAX, drop the
-                        # link rather than block. Bounded memory beats exhaustive
-                        # coverage; dropped links resurface via seeds next cycle.
-                        try:
-                            queue.put_nowait((link, depth + 1))
-                        except asyncio.QueueFull:
-                            state.dropped_links += 1
-
-                await asyncio.sleep(CRAWLER_DELAY)
-        except Exception:
-            logger.exception("Worker error processing %s", url)
-        finally:
-            queue.task_done()
-
-
-def seconds_until_midnight_utc() -> float:
-    now = datetime.now(timezone.utc)
-    tomorrow = (now + timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    return (tomorrow - now).total_seconds()
-
-
-def is_weekly_crawl() -> bool:
-    # Sunday == 6. Weekly full crawl revisits dead sites too.
-    return datetime.now(timezone.utc).weekday() == 6
-
-
-def _build_seed_set(weekly: bool) -> set[str]:
-    """Assemble the URL set for a cycle: seeds + revived + scheduled DB URLs."""
-    urls: set[str] = set(SEED_URLS)
-
-    # Always give long-dead sites a fresh chance at the top of a cycle.
-    urls.update(revive_check())
-
-    # Negative-cache revivals: onions past their dead-cache cooldown get one
-    # retry. is_dead() returns False for them, so the worker won't re-skip them.
-    urls.update(revive_candidates())
-
-    # Daily: stale live sites. Weekly: everything, including currently-dead.
-    urls.update(get_crawl_urls(include_dead=weekly))
-    return urls
-
-
-async def crawl_cycle(weekly: bool = False) -> None:
-    # Bounded frontier: workers drop links once the queue holds QUEUE_MAX items.
-    queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_MAX)
-    semaphore = asyncio.Semaphore(CRAWLER_WORKERS)
-    # Fresh per-cycle visited set so each scheduled run re-crawls from scratch
-    # (freshness is still gated by should_recrawl()). Bounded + LRU-evicting.
-    visited = BoundedVisited(VISITED_MAX)
-    state = RunState()
-    started = time.monotonic()
-
-    seeds = _build_seed_set(weekly)
-
-    # Fold user-submitted URLs from crawl_queue into this cycle's frontier.
-    # Tracked separately so we can reconcile their queue status afterwards.
-    queued = claim_queue_batch()
-    seeds.update(queued)
-
-    logger.info(
-        "%s crawl: queuing %d URLs (seeds + revived + scheduled + %d queued)",
-        "Weekly" if weekly else "Daily",
-        len(seeds),
-        len(queued),
-    )
-    seeded = 0
-    for url in seeds:
-        # Seeds start at depth 0. Use put_nowait so a seed set larger than
-        # QUEUE_MAX can't deadlock here (workers don't run yet); overflow seeds
-        # are deferred to the next cycle, where get_crawl_urls() re-supplies them.
-        try:
-            queue.put_nowait((url, 0))
-            seeded += 1
-        except asyncio.QueueFull:
-            break
-    if seeded < len(seeds):
-        logger.warning(
-            "Queue cap %d reached while seeding; deferred %d URLs to next cycle",
-            QUEUE_MAX, len(seeds) - seeded,
-        )
-
-    transport = httpx.AsyncHTTPTransport(proxy=TOR_PROXY)
-    async with httpx.AsyncClient(transport=transport) as client:
-        # Don't burn a cycle hammering dead onions if Tor isn't routing yet.
-        if not await verify_tor(client):
-            logger.error("Skipping crawl cycle: Tor proxy not ready")
-            # Release the claim so these URLs are retried on the next cycle.
-            requeue_pending(queued)
-            return
-
-        tasks = [
-            asyncio.create_task(worker(queue, visited, semaphore, client, state))
-            for _ in range(CRAWLER_WORKERS)
-        ]
-        await asyncio.gather(*tasks)
-
-    # Mark claimed queue URLs 'done' (now in pages) or 'failed' (still missing).
-    try:
-        reconcile_queue(queued)
-    except Exception:
-        logger.exception("Failed to reconcile crawl queue")
-
-    elapsed = max(time.monotonic() - started, 0.001)
-    pages_per_hour = state.saved / elapsed * 3600
-    logger.info(
-        "Crawl cycle done. Visited %d URLs, saved %d pages in %.0fs (%.1f pages/hour). "
-        "Hosts capped: %d, traps flagged: %d, links dropped (queue full): %d, "
-        "media skipped: %d, illegal skipped: %d.",
-        len(visited),
-        state.saved,
-        elapsed,
-        pages_per_hour,
-        len(state.capped_hosts),
-        len(state.trapped_hosts),
-        state.dropped_links,
-        state.skipped_media,
-        state.skipped_illegal,
-    )
-    if state.run_ceiling_reached():
-        logger.warning("Run ceiling hit: stopped at %d pages", MAX_PAGES_PER_RUN)
-    try:
-        record_crawl_stats(state.saved, pages_per_hour, elapsed)
-    except Exception:
-        logger.exception("Failed to record crawl stats")
+    # Self-feed: insert newly-discovered links not already crawled this batch.
+    fresh = {normalize_url(u) for u in discovered} - {normalize_url(u) for u in batch}
+    if fresh:
+        insert_discovered_links(fresh)
 
 
 async def run() -> None:
-    # Continuous mode: crawl cycle after cycle with only CYCLE_SLEEP seconds of
-    # pause between them, so indexing runs as fast as the queue allows. Sundays
-    # still trigger a weekly full crawl.
-    # Always-on RSS backstop: restarts the process if it outgrows its budget.
+    """Continuous self-feeding crawl loop.
+
+    Bootstraps from SEED_URLS only when the DB is empty, then loops forever:
+    claim user submissions -> pull a tiered batch -> crawl -> (sleep if empty).
+    """
     asyncio.create_task(memory_watchdog())
-    logger.info("Starting bootstrap crawl")
-    await crawl_cycle(weekly=is_weekly_crawl())
 
-    # Run the inactive-page GC at most once per UTC day, after a cycle completes.
-    last_cleanup_day = None
+    transport = httpx.AsyncHTTPTransport(proxy=TOR_PROXY)
+    async with httpx.AsyncClient(transport=transport) as client:
+        # Don't do anything until traffic actually routes through Tor.
+        while not await verify_tor(client):
+            logger.error("Tor proxy not ready; retrying in %.0fs", EMPTY_QUEUE_SLEEP)
+            await asyncio.sleep(EMPTY_QUEUE_SLEEP)
 
-    def _maybe_cleanup() -> None:
-        nonlocal last_cleanup_day
-        today = datetime.now(timezone.utc).date()
-        if today != last_cleanup_day:
+        # Fallback seeding ONLY on an empty DB (first run / server migration).
+        if count_pages() == 0:
+            seeded = insert_discovered_links(SEED_URLS)
+            logger.info("Empty DB: seeded %d fallback URLs", seeded)
+
+        last_cleanup_day = None
+        while True:
+            started = time.monotonic()
+            state = RunState()
+
+            # User-submitted URLs (crawl_queue) get top priority each round.
+            queued = claim_queue_batch()
+            batch = list(dict.fromkeys(queued + get_next_batch()))
+
+            if not batch:
+                logger.info("All tiers empty; sleeping %.0fs", EMPTY_QUEUE_SLEEP)
+                await asyncio.sleep(EMPTY_QUEUE_SLEEP)
+                continue
+
+            logger.info(
+                "Crawl batch: %d URLs (%d user-queued + tiers)", len(batch), len(queued)
+            )
+            await crawl_batch(client, batch, state)
+
+            # Resolve user-submitted queue rows (done if now indexed, else failed).
+            if queued:
+                try:
+                    reconcile_queue(queued)
+                except Exception:
+                    logger.exception("Failed to reconcile crawl queue")
+
+            elapsed = max(time.monotonic() - started, 0.001)
+            pages_per_hour = state.saved / elapsed * 3600
+            logger.info(
+                "Batch done: saved %d in %.0fs (%.1f pages/hour). "
+                "hosts capped=%d traps=%d media=%d illegal=%d",
+                state.saved, elapsed, pages_per_hour,
+                len(state.capped_hosts), len(state.trapped_hosts),
+                state.skipped_media, state.skipped_illegal,
+            )
             try:
-                cleanup_inactive_pages()
+                record_crawl_stats(state.saved, pages_per_hour, elapsed)
             except Exception:
-                logger.exception("Daily inactive-page cleanup failed")
-            last_cleanup_day = today
+                logger.exception("Failed to record crawl stats")
+            try:
+                checkpoint_wal()
+            except Exception:
+                logger.exception("WAL checkpoint failed")
 
-    _maybe_cleanup()
-    while True:
-        logger.info("Sleeping %.0fs until next crawl cycle", CYCLE_SLEEP)
-        await asyncio.sleep(CYCLE_SLEEP)
-        weekly = is_weekly_crawl()
-        logger.info("Starting %s crawl", "weekly" if weekly else "daily")
-        await crawl_cycle(weekly=weekly)
-        _maybe_cleanup()
+            # Run the inactive-page GC at most once per UTC day.
+            today = datetime.now(timezone.utc).date()
+            if today != last_cleanup_day:
+                try:
+                    cleanup_inactive_pages()
+                except Exception:
+                    logger.exception("Daily inactive-page cleanup failed")
+                last_cleanup_day = today
 
 
 if __name__ == "__main__":

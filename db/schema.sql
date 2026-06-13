@@ -25,7 +25,15 @@ CREATE TABLE IF NOT EXISTS pages (
   onion_score     REAL DEFAULT NULL,
   last_scanned_at TIMESTAMP,
   is_active       BOOLEAN DEFAULT 1,
-  content_tag     TEXT DEFAULT 'unknown'
+  content_tag     TEXT DEFAULT 'unknown',
+  -- v3.0 self-feeding crawler. crawl_priority orders the refill queue (higher
+  -- first); crawl_attempts counts consecutive failed crawls (drives the
+  -- exponential next_crawl_at back-off); next_crawl_at is the earliest time a
+  -- row is eligible for (re)crawl. NOTE: rows DISCOVERED as links are inserted
+  -- with last_seen = NULL ("never crawled") so the tier-1 refill picks them up.
+  crawl_priority  INTEGER DEFAULT 5,
+  crawl_attempts  INTEGER DEFAULT 0,
+  next_crawl_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Negative cache for unreachable .onion services. Keeps the crawler from
@@ -61,6 +69,52 @@ CREATE INDEX IF NOT EXISTS idx_pages_is_alive ON pages(is_alive);
 CREATE INDEX IF NOT EXISTS idx_pages_last_seen ON pages(last_seen);
 CREATE INDEX IF NOT EXISTS idx_pages_category ON pages(category);
 CREATE INDEX IF NOT EXISTS idx_pages_enrichment_method ON pages(enrichment_method);
+
+-- NOTE: the v3 pages-column indexes (idx_pages_next_crawl / _crawl_priority) are
+-- intentionally NOT created here. This file is replayed before migrations run,
+-- so on an existing DB those columns don't exist yet and CREATE INDEX would
+-- abort init. They are created in api/models.py:_migrate_001(), AFTER the
+-- guarded ALTER TABLE adds the columns. (Same rule as the v2 indexes.)
+
+-- v3.0 schema-migration ledger (FIX 1). Numbered migrations in
+-- api/models.py run once each, inside a transaction, recording their version
+-- here so they are never replayed. CREATE-only lives in schema.sql; the
+-- migrations themselves are guarded so this is a no-op on a fresh DB.
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version     INTEGER PRIMARY KEY,
+  applied_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  description TEXT
+);
+
+-- v3.0 per-endpoint rate limiting (FIX 3). key = sha256(IP + endpoint + date)
+-- so it rotates daily and never stores a raw IP; window_start is the 60-second
+-- bucket. Rows older than one hour are swept lazily on each request.
+CREATE TABLE IF NOT EXISTS rate_limits (
+  key          TEXT NOT NULL,
+  window_start TIMESTAMP NOT NULL,
+  count        INTEGER DEFAULT 1,
+  PRIMARY KEY (key, window_start)
+);
+
+-- v3.0 persistent URL-shortener cache (FIX 4). Survives container restarts so a
+-- repeated `shorten` for the same URL never re-hits TinyURL.
+CREATE TABLE IF NOT EXISTS url_cache (
+  original_url TEXT PRIMARY KEY,
+  short_url    TEXT NOT NULL,
+  created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- v3.0 daily unique-visitor tracking (PART C). ip_hash = sha256(IP + daily
+-- salt); the salt rotates every 24h so hashes from different days cannot be
+-- correlated. No raw IP is ever stored. UNIQUE(date, ip_hash) makes the daily
+-- distinct-visitor count a simple COUNT(*) per date.
+CREATE TABLE IF NOT EXISTS daily_visitors (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  date     TEXT NOT NULL,
+  ip_hash  TEXT NOT NULL,
+  UNIQUE(date, ip_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_daily_visitors_date ON daily_visitors(date);
 
 -- v2.0 community trust: voting / reporting + a cross-worker PoW challenge store.
 -- Only CREATE ... IF NOT EXISTS lives here (this file is re-run on every boot via

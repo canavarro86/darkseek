@@ -6,6 +6,7 @@ COPY requirements.api.txt .
 RUN pip install --no-cache-dir -r requirements.api.txt
 
 COPY api/       ./api/
+COPY config/    ./config/
 COPY db/        ./db/
 
 RUN mkdir -p /app/db

@@ -85,14 +85,17 @@ services:
       dockerfile: Dockerfile.crawler
     env_file: .env
     environment:
-      - CRAWLER_WORKERS=5
-      - CRAWLER_DELAY=1.5
-      - CYCLE_SLEEP=30
+      # v3 self-feeding crawler. Kept low for the 1GB box (the spec's
+      # CONCURRENT_REQUESTS=2 / DOWNLOAD_DELAY=3 intent). EMPTY_QUEUE_SLEEP is the
+      # idle wait when every refill tier is empty.
+      - CRAWLER_WORKERS=2
+      - CRAWLER_DELAY=3
+      - EMPTY_QUEUE_SLEEP=60
     # 256m to fund tor's headroom within the 1GB budget. Peak crawler RSS stays
     # under this: bounded queue/visited set (10k-page run ceiling), streaming
     # enrichment, no full-table loads. Envelope: tor 180 + api 180 + nginx 32 +
     # crawler 256 = 648m of 1024m. See self-review.
-    mem_limit: 280m
+    mem_limit: 250m
     volumes:
       - /opt/darkseek_db:/app/db
     depends_on:
@@ -103,7 +106,7 @@ services:
     networks:
       - darkseek
     # Continuous seed-week mode: keep the crawler running across restarts.
-    restart: unless-stopped
+    restart: on-failure
     deploy:
       restart_policy:
         condition: on-failure
@@ -114,6 +117,35 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Daily DB backup (FIX 7). Bind-mounts the SAME host DB path the api/crawler
+  # use (read-only) so it backs up the live database, and writes snapshots to
+  # /opt/darkseek_backups on the host. Replaces the previous host cron at 23:00.
+  backup:
+    image: alpine
+    mem_limit: 20m
+    volumes:
+      - /opt/darkseek_db:/opt/darkseek_db:ro
+      - /opt/darkseek_backups:/opt/darkseek_backups
+      - ./scripts:/scripts:ro
+    environment:
+      - DATABASE_PATH=/opt/darkseek_db/darkseek.db
+      - BACKUP_DIR=/opt/darkseek_backups
+      - BACKUP_KEEP=7
+    # Install sqlite (for the online .backup) + register a 03:00 UTC cron, then
+    # run crond in the foreground. The container TZ is UTC by default.
+    command: >
+      sh -c "apk add --no-cache sqlite >/dev/null &&
+             echo '0 3 * * * /scripts/backup.sh >> /var/log/backup.log 2>&1' > /etc/crontabs/root &&
+             crond -f -l 2"
+    restart: always
+    networks:
+      - darkseek
     logging:
       driver: json-file
       options:

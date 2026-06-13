@@ -6,21 +6,25 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+from datetime import date
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from flask import Flask, g, jsonify, request
+from flask import Flask, Response, g, jsonify, request
 from flask_cors import CORS
 
+from config.blocked import BLOCKED_SEARCH_TERMS
 from .models import (
     db_size_mb,
     get_crawl_stats,
     get_db,
     get_search_stats,
+    get_visitor_stats,
     log_search_query,
 )
+from .openapi import OPENAPI_SPEC, SWAGGER_UI_HTML
 from .search import search_pages
 
 logging.basicConfig(
@@ -60,31 +64,9 @@ if _cors_origins:
 
 CATEGORIES = {"forum", "market", "news", "wiki", "service", "other"}
 
-# Illegal-content search blocklist (CSAM). A query containing any of these
-# substrings is refused with an empty result set before it ever hits the index.
-# Lowercase substrings; matched against the lowercased, sanitized query.
-BLOCKED_SEARCH_TERMS = frozenset({
-    # CSAM — original terms
-    'loli', 'lolita', 'pedo', 'pedophil', 'preteen', 'pre-teen',
-    'jailbait', 'child porn', 'childporn', 'cp porn', 'toddlercon',
-    'underage porn', 'kids porn', 'kiddie', 'shota', 'shotacon',
-    'tweenfan', 'sophie webcam',
-    # CSAM — added from real query logs (zero-result CSAM queries observed in production)
-    'kids peeing', 'kids pee', 'kids pic', 'kids photo',
-    'children pic', 'children photo', 'children nude',
-    'young michelle', 'girl pics download michelle',
-    'young girl pic', 'young boy pic',
-    'teen nude', 'teen naked', 'teen xxx',
-    'minor nude', 'minor naked', 'minor porn',
-    'baby nude', 'baby naked',
-    # Illegal goods — from production query logs
-    'sell human kidney', 'buy kidney', 'organ trafficking', 'buy organ',
-    'buy passport', 'fake passport', 'counterfeit passport',
-    'buy id card', 'fake id', 'counterfeit id',
-    'hire hitman', 'kill someone', 'murder for hire',
-    'buy fentanyl', 'buy heroin', 'buy cocaine', 'buy meth',
-    'buy drugs online', 'dark market drugs', 'buy russian prostitute Marlin'
-})
+# Illegal-content search blocklist (CSAM + illegal goods). Single source of truth
+# now lives in config/blocked.py (FIX 2), shared with the crawler. A query
+# containing any of these substrings is refused before it ever hits the index.
 
 def _is_blocked_query(query: str) -> bool:
     """True if the query contains any blocked CSAM search term (substring)."""
@@ -150,6 +132,79 @@ def _submit_allowed(ip: str) -> bool:
     return True
 
 
+# --- Per-endpoint rate limiting (FIX 3) -------------------------------------
+# SQLite-backed (cross-worker: gunicorn runs 2 workers). The key is a daily-
+# rotating, IP-derived hash so we never store a raw IP. 10 requests / 60s window
+# per endpoint; on exceed -> HTTP 429 + Retry-After. Rows older than an hour are
+# swept lazily on each call.
+RATE_WINDOW = 60
+RATE_MAX = 10
+
+
+def _rate_limited(endpoint: str):
+    """Return a 429 Response if the caller is over the limit, else None.
+
+    Privacy: the stored key is sha256(IP + endpoint + date); the raw IP is never
+    written. The date component also rotates the key every 24h.
+    """
+    ip = _client_ip()
+    today = date.today().isoformat()
+    key = hashlib.sha256(f"{ip}|{endpoint}|{today}".encode()).hexdigest()
+    now = int(time.time())
+    window_start = now - (now % RATE_WINDOW)
+    try:
+        with get_db() as conn:
+            # Lazy cleanup of windows older than one hour.
+            conn.execute("DELETE FROM rate_limits WHERE window_start < ?", (now - 3600,))
+            conn.execute(
+                "INSERT INTO rate_limits (key, window_start, count) VALUES (?, ?, 1) "
+                "ON CONFLICT(key, window_start) DO UPDATE SET count = count + 1",
+                (key, window_start),
+            )
+            count = conn.execute(
+                "SELECT count FROM rate_limits WHERE key = ? AND window_start = ?",
+                (key, window_start),
+            ).fetchone()[0]
+            conn.commit()
+    except Exception:
+        # Fail open: a limiter DB hiccup must never block legitimate traffic.
+        logger.debug("rate limiter error on %s", endpoint, exc_info=True)
+        return None
+
+    if count > RATE_MAX:
+        retry_after = max(1, window_start + RATE_WINDOW - now)
+        resp = jsonify({"ok": False, "error": "rate limit exceeded"})
+        resp.status_code = 429
+        resp.headers["Retry-After"] = str(retry_after)
+        logger.info("rate limited endpoint=%s (count=%d)", endpoint, count)
+        return resp
+    return None
+
+
+# --- Daily unique-visitor tracking (PART C) ---------------------------------
+def _track_visitor() -> None:
+    """Record one daily-unique visitor for the current request. Never raises.
+
+    Privacy (non-negotiable): the raw IP is never stored or logged. We store only
+    ip_hash = sha256(IP + daily_salt), where daily_salt = sha256(today + secret).
+    The salt rotates every 24h, so hashes from different days cannot be linked.
+    """
+    try:
+        ip = _client_ip()
+        today = date.today().isoformat()
+        salt = hashlib.sha256((today + "darkseek-salt").encode()).hexdigest()
+        ip_hash = hashlib.sha256((ip + salt).encode()).hexdigest()
+        with get_db() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO daily_visitors (date, ip_hash) VALUES (?, ?)",
+                (today, ip_hash),
+            )
+            conn.commit()
+    except Exception:
+        # Best-effort analytics only — swallow everything.
+        logger.debug("visitor tracking failed", exc_info=True)
+
+
 @app.before_request
 def _assign_request_id() -> None:
     g.request_id = uuid.uuid4().hex[:8]
@@ -167,9 +222,15 @@ def stats():
         by_category = conn.execute(
             "SELECT category, COUNT(*) as cnt FROM pages WHERE is_alive = 1 GROUP BY category"
         ).fetchall()
+    visitors = get_visitor_stats()  # {visitors_today, visitors_yesterday}
     return jsonify({
+        # `total_pages` kept for backward compatibility with the frontend;
+        # `pages_indexed` is the PART C alias.
         "total_pages": total,
+        "pages_indexed": total,
         "by_category": {(r["category"] or "other"): r["cnt"] for r in by_category},
+        "visitors_today": visitors["visitors_today"],
+        "visitors_yesterday": visitors["visitors_yesterday"],
         "status": "ok"
     })
 
@@ -192,6 +253,9 @@ def metrics():
 
 @app.get("/api/search")
 def search():
+    # PART C: count this request as a daily-unique visitor (privacy-safe hash).
+    _track_visitor()
+
     query = _sanitize_query(request.args.get("q", ""))
     if not query:
         return jsonify({"error": "q parameter required"}), 400
@@ -342,6 +406,9 @@ def api_challenge():
 
 @app.post("/api/vote")
 def api_vote():
+    limited = _rate_limited("vote")
+    if limited:
+        return limited
     data = request.get_json(silent=True) or {}
     vote_type = data.get("vote_type")
     if vote_type not in ("fresh", "rotten"):
@@ -383,6 +450,9 @@ def api_vote():
 
 @app.post("/api/report")
 def api_report():
+    limited = _rate_limited("report")
+    if limited:
+        return limited
     data = request.get_json(silent=True) or {}
     reason = data.get("reason")
     if reason not in REPORT_REASONS:
@@ -590,10 +660,6 @@ def api_ip():
     return resp
 
 
-# Process-lifetime cache of url -> shortened url, to avoid duplicate TinyURL
-# calls for the same input. Bounded so a hostile caller can't grow it forever.
-_shorten_cache: dict[str, str] = {}
-_SHORTEN_CACHE_MAX = 1000
 SHORTEN_TIMEOUT = 5  # seconds
 
 
@@ -603,7 +669,14 @@ def api_shorten():
 
     Params: url (http/https only, validated before any outbound call).
     Returns: {"short": "<url>"} on success, {"error": ...} otherwise.
+
+    FIX 4: results are cached in the `url_cache` table, so the cache survives
+    container restarts and a repeated shorten never re-hits TinyURL.
     """
+    limited = _rate_limited("shorten")
+    if limited:
+        return limited
+
     url = (request.args.get("url") or "").strip()
 
     # Validate before proxying: scheme + host required, sane length, no junk.
@@ -613,8 +686,13 @@ def api_shorten():
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return jsonify({"error": "invalid url"}), 400
 
-    if url in _shorten_cache:
-        return jsonify({"short": _shorten_cache[url], "cached": True})
+    # Persistent cache lookup first.
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT short_url FROM url_cache WHERE original_url = ?", (url,)
+        ).fetchone()
+    if row is not None:
+        return jsonify({"short": row["short_url"], "cached": True})
 
     api = "https://tinyurl.com/api-create.php?url=" + urllib.parse.quote(url, safe="")
     try:
@@ -627,10 +705,33 @@ def api_shorten():
     if not short.startswith("http"):
         return jsonify({"error": "shorten failed"}), 502
 
-    if len(_shorten_cache) < _SHORTEN_CACHE_MAX:
-        _shorten_cache[url] = short
+    # Persist for next time (INSERT OR IGNORE: a concurrent writer wins harmlessly).
+    with get_db() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO url_cache (original_url, short_url) VALUES (?, ?)",
+            (url, short),
+        )
+        conn.commit()
     logger.info("shorten url=%r -> %s", url, short)
     return jsonify({"short": short})
+
+
+# --- OpenAPI documentation (FIX 5) ------------------------------------------
+# The API is Flask, not FastAPI, so there is no built-in /docs. We serve a
+# hand-maintained OpenAPI 3 spec at /openapi.json and a minimal Swagger-UI page
+# at /docs (UI assets loaded from a CDN; the spec itself is fully local).
+@app.get("/openapi.json")
+def openapi_json():
+    """Machine-readable OpenAPI 3.0 description of the public API."""
+    resp = jsonify(OPENAPI_SPEC)
+    resp.headers["Cache-Control"] = "max-age=3600"
+    return resp
+
+
+@app.get("/docs")
+def api_docs():
+    """Human-readable Swagger UI, rendered against /openapi.json."""
+    return Response(SWAGGER_UI_HTML, mimetype="text/html")
 
 
 def run() -> None:
