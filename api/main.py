@@ -1,13 +1,19 @@
+import csv
 import hashlib
+import io
 import logging
 import os
 import re
+import secrets
 import time
 import urllib.parse
 import urllib.request
 import uuid
 from datetime import date
+from functools import wraps
 
+import bcrypt
+import jwt
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -63,6 +69,120 @@ if _cors_origins:
     CORS(app, resources={r"/api/*": {"origins": _cors_origins}})
 
 CATEGORIES = {"forum", "market", "news", "wiki", "service", "other"}
+
+# --- Admin panel: auth secret + decorators + helpers ------------------------
+# Falls back to a per-process random secret if JWT_SECRET is unset; that logs
+# every admin out on restart but never ships a hard-coded key. Set JWT_SECRET in
+# .env for stable sessions across restarts.
+JWT_SECRET = os.environ.get("JWT_SECRET", secrets.token_hex(32))
+
+
+def require_admin(fn):
+    """Gate an endpoint behind a valid admin session.
+
+    Reads the httpOnly 'admin_token' JWT, verifies its signature, then confirms
+    the referenced session row is unexpired and the admin is still active. On
+    success populates g.current_admin and g.session_id; on any failure returns
+    HTTP 401 with a JSON error.
+    """
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        token = request.cookies.get("admin_token")
+        if not token:
+            return jsonify({"error": "Unauthorized"}), 401
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        except Exception:
+            return jsonify({"error": "Unauthorized"}), 401
+        session_id = payload.get("session_id")
+        admin_id = payload.get("sub")
+        if not session_id or admin_id is None:
+            return jsonify({"error": "Unauthorized"}), 401
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT a.id AS aid, a.username, a.role "
+                "FROM admin_sessions s JOIN admins a ON a.id = s.admin_id "
+                "WHERE s.id = ? AND s.expires_at > CURRENT_TIMESTAMP "
+                "AND a.is_active = 1",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return jsonify({"error": "Unauthorized"}), 401
+        g.current_admin = {"id": row["aid"], "username": row["username"], "role": row["role"]}
+        g.session_id = session_id
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def require_superadmin(fn):
+    """Like require_admin, but additionally requires the 'superadmin' role."""
+    @require_admin
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if g.current_admin["role"] != "superadmin":
+            return jsonify({"error": "Forbidden"}), 403
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def log_audit(conn, admin_id, action, target=None, details=None, ip=None):
+    """Append one row to admin_audit_log. The caller owns the commit.
+
+    The raw IP is never stored — only sha256(ip) — to honour the no-logs policy.
+    """
+    ip_hash = hashlib.sha256(ip.encode()).hexdigest() if ip else None
+    conn.execute(
+        "INSERT INTO admin_audit_log (admin_id, action, target, details, ip_hash) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (admin_id, action, target, details, ip_hash),
+    )
+
+
+def _admin_rate_limit(tag: str, window: int, max_attempts: int) -> bool:
+    """Cross-worker rate limit on the SQLite rate_limits table.
+
+    Returns True if the caller is still under the limit for this window, False if
+    they have exceeded it. The stored key is sha256(IP + tag); the raw IP is never
+    written. Fails open on any DB error so a hiccup cannot lock admins out.
+    """
+    ip = _client_ip()
+    key = hashlib.sha256(f"{ip}|{tag}".encode()).hexdigest()
+    now = int(time.time())
+    window_start = now - (now % window)
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "DELETE FROM rate_limits WHERE window_start < ?", (now - window * 2,)
+            )
+            conn.execute(
+                "INSERT INTO rate_limits (key, window_start, count) VALUES (?, ?, 1) "
+                "ON CONFLICT(key, window_start) DO UPDATE SET count = count + 1",
+                (key, window_start),
+            )
+            count = conn.execute(
+                "SELECT count FROM rate_limits WHERE key = ? AND window_start = ?",
+                (key, window_start),
+            ).fetchone()[0]
+            conn.commit()
+    except Exception:
+        logger.debug("admin rate limiter error tag=%s", tag, exc_info=True)
+        return True
+    return count <= max_attempts
+
+
+def _page_args():
+    """Parse (page, per_page) from the query string with sane bounds."""
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+    except (ValueError, TypeError):
+        page = 1
+    try:
+        per_page = min(100, max(1, int(request.args.get("per_page", 50))))
+    except (ValueError, TypeError):
+        per_page = 50
+    return page, per_page
 
 # Illegal-content search blocklist (CSAM + illegal goods). Single source of truth
 # now lives in config/blocked.py (FIX 2), shared with the crawler. A query
@@ -732,6 +852,511 @@ def openapi_json():
 def api_docs():
     """Human-readable Swagger UI, rendered against /openapi.json."""
     return Response(SWAGGER_UI_HTML, mimetype="text/html")
+
+
+# --- Admin panel endpoints --------------------------------------------------
+# All /api/admin/* routes are reachable only through the private admin onion
+# address (nginx 404s them on the public addresses). Authentication is a signed,
+# httpOnly JWT bound to a server-side admin_sessions row; every mutating action
+# is written to admin_audit_log.
+
+@app.post("/api/admin/login")
+def admin_login():
+    ip = _client_ip()
+    # Brute-force throttle: 5 attempts per 15-minute window per IP.
+    if not _admin_rate_limit("admin_login", 900, 5):
+        return jsonify({"error": "Too many attempts. Try again later."}), 429
+
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    if not username or not password:
+        return jsonify({"error": "Invalid credentials"}), 401
+
+    with get_db() as conn:
+        admin = conn.execute(
+            "SELECT id, username, password_hash, role, is_active "
+            "FROM admins WHERE username = ?",
+            (username,),
+        ).fetchone()
+        if admin is None or not admin["is_active"]:
+            return jsonify({"error": "Invalid credentials"}), 401
+        try:
+            ok = bcrypt.checkpw(password.encode(), admin["password_hash"].encode())
+        except Exception:
+            ok = False
+        if not ok:
+            return jsonify({"error": "Invalid credentials"}), 401
+
+        session_id = str(uuid.uuid4())
+        ip_hash = hashlib.sha256(ip.encode()).hexdigest()
+        conn.execute(
+            "INSERT INTO admin_sessions (id, admin_id, expires_at, ip_hash) "
+            "VALUES (?, ?, datetime('now', '+8 hours'), ?)",
+            (session_id, admin["id"], ip_hash),
+        )
+        conn.execute(
+            "UPDATE admins SET last_login = CURRENT_TIMESTAMP WHERE id = ?",
+            (admin["id"],),
+        )
+        log_audit(conn, admin["id"], "login", ip=ip)
+        conn.commit()
+
+    token = jwt.encode(
+        {"sub": admin["id"], "session_id": session_id, "role": admin["role"]},
+        JWT_SECRET,
+        algorithm="HS256",
+    )
+    resp = jsonify({"status": "ok", "username": admin["username"], "role": admin["role"]})
+    # httpOnly so JS can never read it; SameSite=Strict; 8h lifetime. secure is
+    # intentionally off — the onion service is served over plain HTTP inside Tor.
+    resp.set_cookie(
+        "admin_token", token,
+        httponly=True, samesite="Strict", max_age=28800, path="/",
+    )
+    return resp
+
+
+@app.post("/api/admin/logout")
+@require_admin
+def admin_logout():
+    ip = _client_ip()
+    with get_db() as conn:
+        conn.execute("DELETE FROM admin_sessions WHERE id = ?", (g.session_id,))
+        log_audit(conn, g.current_admin["id"], "logout", ip=ip)
+        conn.commit()
+    resp = jsonify({"status": "ok"})
+    resp.set_cookie("admin_token", "", expires=0, path="/")
+    return resp
+
+
+@app.get("/api/admin/dashboard")
+@require_admin
+def admin_dashboard():
+    with get_db() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
+        alive = conn.execute("SELECT COUNT(*) FROM pages WHERE is_alive = 1").fetchone()[0]
+        pages_today = conn.execute(
+            "SELECT COUNT(*) FROM pages WHERE indexed_at >= datetime('now', '-1 day')"
+        ).fetchone()[0]
+        pages_7d = conn.execute(
+            "SELECT COUNT(*) FROM pages WHERE indexed_at >= datetime('now', '-7 days')"
+        ).fetchone()[0]
+        pages_30d = conn.execute(
+            "SELECT COUNT(*) FROM pages WHERE indexed_at >= datetime('now', '-30 days')"
+        ).fetchone()[0]
+        cat_rows = conn.execute(
+            "SELECT category, COUNT(*) AS c FROM pages GROUP BY category"
+        ).fetchall()
+        lang_rows = conn.execute(
+            "SELECT lang, COUNT(*) AS c FROM pages GROUP BY lang"
+        ).fetchall()
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM removal_requests WHERE status = 'pending'"
+        ).fetchone()[0]
+        unread = conn.execute(
+            "SELECT COUNT(*) FROM notifications WHERE is_read = 0"
+        ).fetchone()[0]
+        audit = conn.execute(
+            "SELECT l.action, a.username, l.target, l.created_at "
+            "FROM admin_audit_log l LEFT JOIN admins a ON a.id = l.admin_id "
+            "ORDER BY l.created_at DESC LIMIT 10"
+        ).fetchall()
+
+    by_category = {c: 0 for c in ("forum", "market", "news", "wiki", "service", "other")}
+    for r in cat_rows:
+        key = r["category"] or "other"
+        by_category[key] = by_category.get(key, 0) + r["c"]
+    by_lang = {(r["lang"] or "unknown"): r["c"] for r in lang_rows}
+
+    return jsonify({
+        "total_pages": total,
+        "alive_pages": alive,
+        "dead_pages": total - alive,
+        "pages_today": pages_today,
+        "pages_7d": pages_7d,
+        "pages_30d": pages_30d,
+        "by_category": by_category,
+        "by_lang": by_lang,
+        "pending_removals": pending,
+        "unread_notifications": unread,
+        "recent_audit": [
+            {
+                "action": r["action"],
+                "username": r["username"],
+                "target": r["target"],
+                "created_at": r["created_at"],
+            }
+            for r in audit
+        ],
+    })
+
+
+@app.get("/api/admin/pages")
+@require_admin
+def admin_pages():
+    q = (request.args.get("q") or "").strip()
+    category = request.args.get("category")
+    lang = request.args.get("lang")
+    alive = request.args.get("alive")
+    page, per_page = _page_args()
+
+    join = ""
+    where = []
+    params = []
+    if q:
+        if q.startswith("http"):
+            where.append("p.url LIKE ?")
+            params.append(f"%{q}%")
+        else:
+            join = " JOIN pages_fts ON pages_fts.rowid = p.id"
+            where.append("pages_fts MATCH ?")
+            params.append(q)
+    if category in CATEGORIES:
+        where.append("p.category = ?")
+        params.append(category)
+    if lang:
+        where.append("p.lang = ?")
+        params.append(lang)
+    if alive in ("alive", "1"):
+        where.append("p.is_alive = 1")
+    elif alive in ("dead", "0"):
+        where.append("p.is_alive = 0")
+
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    offset = (page - 1) * per_page
+    try:
+        with get_db() as conn:
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM pages p{join}{where_sql}", params
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"SELECT p.id, p.url, p.title, p.description, p.category, p.lang, "
+                f"p.is_alive, p.indexed_at, p.last_seen FROM pages p{join}{where_sql} "
+                f"ORDER BY p.indexed_at DESC LIMIT ? OFFSET ?",
+                params + [per_page, offset],
+            ).fetchall()
+    except Exception:
+        # Most likely a malformed FTS MATCH expression from the search box.
+        return jsonify({"error": "invalid search query"}), 400
+
+    total_pages = (total + per_page - 1) // per_page
+    return jsonify({
+        "pages": [dict(r) for r in rows],
+        "total": total,
+        "page": page,
+        "total_pages": total_pages,
+    })
+
+
+@app.get("/api/admin/pages/<int:page_id>")
+@require_admin
+def admin_page_get(page_id):
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM pages WHERE id = ?", (page_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(dict(row))
+
+
+@app.put("/api/admin/pages/<int:page_id>")
+@require_admin
+def admin_page_update(page_id):
+    ip = _client_ip()
+    data = request.get_json(silent=True) or {}
+    allowed = ("title", "description", "category", "lang", "is_alive")
+    sets = []
+    params = []
+    for field in allowed:
+        if field in data:
+            sets.append(f"{field} = ?")
+            value = data[field]
+            if field == "is_alive":
+                value = 1 if value in (1, True, "1", "true", "alive") else 0
+            params.append(value)
+    if not sets:
+        return jsonify({"error": "no fields to update"}), 400
+
+    with get_db() as conn:
+        existing = conn.execute("SELECT url FROM pages WHERE id = ?", (page_id,)).fetchone()
+        if existing is None:
+            return jsonify({"error": "not found"}), 404
+        conn.execute(
+            f"UPDATE pages SET {', '.join(sets)} WHERE id = ?", params + [page_id]
+        )
+        log_audit(conn, g.current_admin["id"], "edit_page", target=existing["url"], ip=ip)
+        conn.commit()
+    return jsonify({"status": "ok"})
+
+
+@app.delete("/api/admin/pages/<int:page_id>")
+@require_superadmin
+def admin_page_delete(page_id):
+    ip = _client_ip()
+    with get_db() as conn:
+        existing = conn.execute("SELECT url FROM pages WHERE id = ?", (page_id,)).fetchone()
+        if existing is None:
+            return jsonify({"error": "not found"}), 404
+        conn.execute("DELETE FROM pages WHERE id = ?", (page_id,))
+        log_audit(conn, g.current_admin["id"], "delete_page", target=existing["url"], ip=ip)
+        conn.commit()
+    return jsonify({"status": "ok"})
+
+
+@app.post("/api/admin/pages")
+@require_admin
+def admin_page_add():
+    ip = _client_ip()
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if ".onion" not in url:
+        return jsonify({"error": "url must be a .onion address"}), 400
+    title = data.get("title") or "Pending scan..."
+    description = data.get("description") or "Added by admin, pending crawl"
+    category = data.get("category") if data.get("category") in CATEGORIES else "other"
+    lang = data.get("lang") or "other"
+
+    with get_db() as conn:
+        if conn.execute("SELECT 1 FROM pages WHERE url = ?", (url,)).fetchone():
+            return jsonify({"error": "already indexed"}), 409
+        conn.execute(
+            "INSERT INTO pages (url, title, description, category, lang, is_alive, fail_count) "
+            "VALUES (?, ?, ?, ?, ?, 1, 0)",
+            (url, title, description, category, lang),
+        )
+        log_audit(conn, g.current_admin["id"], "add_page", target=url, ip=ip)
+        conn.commit()
+    return jsonify({"status": "ok"})
+
+
+@app.get("/api/admin/removals")
+@require_admin
+def admin_removals():
+    status = request.args.get("status")
+    page, per_page = _page_args()
+    where = []
+    params = []
+    if status in ("pending", "reviewed", "removed", "rejected"):
+        where.append("r.status = ?")
+        params.append(status)
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    offset = (page - 1) * per_page
+    with get_db() as conn:
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM removal_requests r{where_sql}", params
+        ).fetchone()[0]
+        rows = conn.execute(
+            f"SELECT r.*, a.username AS reviewer FROM removal_requests r "
+            f"LEFT JOIN admins a ON a.id = r.reviewed_by{where_sql} "
+            f"ORDER BY r.created_at DESC LIMIT ? OFFSET ?",
+            params + [per_page, offset],
+        ).fetchall()
+    total_pages = (total + per_page - 1) // per_page
+    return jsonify({
+        "removals": [dict(r) for r in rows],
+        "total": total,
+        "page": page,
+        "total_pages": total_pages,
+    })
+
+
+@app.put("/api/admin/removals/<int:removal_id>")
+@require_admin
+def admin_removal_review(removal_id):
+    ip = _client_ip()
+    data = request.get_json(silent=True) or {}
+    action = data.get("action")
+    notes = data.get("notes") or ""
+    if action not in ("approve", "reject"):
+        return jsonify({"error": "action must be approve|reject"}), 400
+
+    with get_db() as conn:
+        removal = conn.execute(
+            "SELECT id, url FROM removal_requests WHERE id = ?", (removal_id,)
+        ).fetchone()
+        if removal is None:
+            return jsonify({"error": "not found"}), 404
+        url = removal["url"]
+        if action == "approve":
+            conn.execute("DELETE FROM pages WHERE url = ?", (url,))
+            new_status = "removed"
+            audit_action = "approve_removal"
+            note_msg = f"Removal approved for: {url}"
+        else:
+            new_status = "rejected"
+            audit_action = "reject_removal"
+            note_msg = f"Removal rejected for: {url}"
+        conn.execute(
+            "UPDATE removal_requests SET status = ?, reviewed_at = CURRENT_TIMESTAMP, "
+            "reviewed_by = ?, notes = ? WHERE id = ?",
+            (new_status, g.current_admin["id"], notes, removal_id),
+        )
+        conn.execute(
+            "INSERT INTO notifications (type, message) VALUES ('removal_request', ?)",
+            (note_msg,),
+        )
+        log_audit(conn, g.current_admin["id"], audit_action, target=url, ip=ip)
+        conn.commit()
+    return jsonify({"status": "ok"})
+
+
+@app.get("/api/admin/users")
+@require_superadmin
+def admin_users():
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, username, role, created_at, last_login, is_active "
+            "FROM admins ORDER BY id"
+        ).fetchall()
+    return jsonify({"users": [dict(r) for r in rows]})
+
+
+@app.post("/api/admin/users")
+@require_superadmin
+def admin_user_create():
+    ip = _client_ip()
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    role = data.get("role") if data.get("role") in ("admin", "superadmin") else "admin"
+    if not username or not password:
+        return jsonify({"error": "username and password required"}), 400
+
+    password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    with get_db() as conn:
+        if conn.execute("SELECT 1 FROM admins WHERE username = ?", (username,)).fetchone():
+            return jsonify({"error": "username already exists"}), 409
+        conn.execute(
+            "INSERT INTO admins (username, password_hash, role) VALUES (?, ?, ?)",
+            (username, password_hash, role),
+        )
+        log_audit(conn, g.current_admin["id"], "create_user", target=username, ip=ip)
+        conn.commit()
+    return jsonify({"status": "ok"})
+
+
+@app.put("/api/admin/users/<int:user_id>/deactivate")
+@require_superadmin
+def admin_user_deactivate(user_id):
+    ip = _client_ip()
+    if user_id == g.current_admin["id"]:
+        return jsonify({"error": "cannot deactivate yourself"}), 400
+    with get_db() as conn:
+        target = conn.execute(
+            "SELECT username FROM admins WHERE id = ?", (user_id,)
+        ).fetchone()
+        if target is None:
+            return jsonify({"error": "not found"}), 404
+        conn.execute("UPDATE admins SET is_active = 0 WHERE id = ?", (user_id,))
+        conn.execute("DELETE FROM admin_sessions WHERE admin_id = ?", (user_id,))
+        log_audit(conn, g.current_admin["id"], "deactivate_user", target=target["username"], ip=ip)
+        conn.commit()
+    return jsonify({"status": "ok"})
+
+
+@app.get("/api/admin/notifications")
+@require_admin
+def admin_notifications():
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM notifications ORDER BY created_at DESC LIMIT 50"
+        ).fetchall()
+    return jsonify({"notifications": [dict(r) for r in rows]})
+
+
+@app.post("/api/admin/notifications/read-all")
+@require_admin
+def admin_notifications_read_all():
+    with get_db() as conn:
+        conn.execute("UPDATE notifications SET is_read = 1")
+        conn.commit()
+    return jsonify({"status": "ok"})
+
+
+@app.get("/api/admin/audit")
+@require_admin
+def admin_audit():
+    admin_id = request.args.get("admin_id")
+    action = request.args.get("action")
+    page, per_page = _page_args()
+    where = []
+    params = []
+    if admin_id:
+        try:
+            where.append("l.admin_id = ?")
+            params.append(int(admin_id))
+        except (ValueError, TypeError):
+            return jsonify({"error": "invalid admin_id"}), 400
+    if action:
+        where.append("l.action = ?")
+        params.append(action)
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    offset = (page - 1) * per_page
+    with get_db() as conn:
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM admin_audit_log l{where_sql}", params
+        ).fetchone()[0]
+        rows = conn.execute(
+            f"SELECT l.id, l.action, l.target, l.details, l.ip_hash, l.created_at, "
+            f"a.username FROM admin_audit_log l "
+            f"LEFT JOIN admins a ON a.id = l.admin_id{where_sql} "
+            f"ORDER BY l.created_at DESC LIMIT ? OFFSET ?",
+            params + [per_page, offset],
+        ).fetchall()
+    total_pages = (total + per_page - 1) // per_page
+    return jsonify({
+        "audit": [dict(r) for r in rows],
+        "total": total,
+        "page": page,
+        "total_pages": total_pages,
+    })
+
+
+@app.get("/api/admin/export/audit")
+@require_superadmin
+def admin_audit_export():
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT l.created_at, a.username, l.action, l.target, l.ip_hash "
+            "FROM admin_audit_log l LEFT JOIN admins a ON a.id = l.admin_id "
+            "ORDER BY l.created_at DESC"
+        ).fetchall()
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["timestamp", "username", "action", "target", "ip_hash"])
+    for r in rows:
+        writer.writerow([r["created_at"], r["username"], r["action"], r["target"], r["ip_hash"]])
+    resp = Response(buf.getvalue(), mimetype="text/csv")
+    resp.headers["Content-Disposition"] = "attachment; filename=audit_log.csv"
+    return resp
+
+
+@app.post("/api/removal-request")
+def removal_request():
+    """Public link-removal request (no auth). Backs the /terms removal form."""
+    if not _admin_rate_limit("removal", 3600, 3):
+        return jsonify({"error": "Too many requests. Try again later."}), 429
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    reason = data.get("reason")
+    description = data.get("description") or ""
+    if not url:
+        return jsonify({"error": "url required"}), 400
+    if reason not in ("dmca", "illegal", "other"):
+        return jsonify({"error": "reason must be dmca|illegal|other"}), 400
+
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO removal_requests (url, reason, description) VALUES (?, ?, ?)",
+            (url, reason, description),
+        )
+        conn.execute(
+            "INSERT INTO notifications (type, message) VALUES ('removal_request', ?)",
+            (f"New removal request for: {url}",),
+        )
+        conn.commit()
+    logger.info("removal request received (reason=%s)", reason)
+    return jsonify({"status": "submitted"})
 
 
 def run() -> None:

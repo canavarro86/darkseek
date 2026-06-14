@@ -331,6 +331,100 @@ def _migrate_004(conn: sqlite3.Connection) -> None:
     )
 
 
+@_migration(5, "admin panel tables + superadmin seed")
+def _migrate_005(conn: sqlite3.Connection) -> None:
+    # All CREATE TABLE statements run inside the migration's single transaction
+    # (the runner has already issued BEGIN). bcrypt is imported lazily here so
+    # the crawler image — which never applies this migration (the API applies it
+    # first, the crawler then skips an already-recorded version) — does not need
+    # bcrypt as a dependency.
+    import secrets
+
+    import bcrypt
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admins (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            username      TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role          TEXT DEFAULT 'admin' CHECK(role IN ('superadmin','admin')),
+            created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_login    TIMESTAMP,
+            is_active     INTEGER DEFAULT 1
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_sessions (
+            id         TEXT PRIMARY KEY,
+            admin_id   INTEGER REFERENCES admins(id),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL,
+            ip_hash    TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS removal_requests (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            url         TEXT NOT NULL,
+            reason      TEXT CHECK(reason IN ('dmca','illegal','other')),
+            description TEXT,
+            status      TEXT DEFAULT 'pending'
+                        CHECK(status IN ('pending','reviewed','removed','rejected')),
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            reviewed_at TIMESTAMP,
+            reviewed_by INTEGER REFERENCES admins(id),
+            notes       TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_audit_log (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            admin_id   INTEGER REFERENCES admins(id),
+            action     TEXT NOT NULL,
+            target     TEXT,
+            details    TEXT,
+            ip_hash    TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS notifications (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            type       TEXT NOT NULL,
+            message    TEXT NOT NULL,
+            is_read    INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    # Seed the initial superadmin exactly once. The generated password is printed
+    # to the container log a single time on first run — it is never stored in
+    # plaintext, only as a bcrypt hash — so the operator must capture it then.
+    existing = conn.execute("SELECT id FROM admins WHERE username='admin'").fetchone()
+    if not existing:
+        password = secrets.token_urlsafe(16)
+        password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        conn.execute(
+            "INSERT INTO admins (username, password_hash, role) VALUES (?, ?, ?)",
+            ('admin', password_hash, 'superadmin')
+        )
+        print(f"\n{'='*50}", flush=True)
+        print(f"[DARKSEEK ADMIN PASSWORD] username: admin", flush=True)
+        print(f"[DARKSEEK ADMIN PASSWORD] password: {password}", flush=True)
+        print(f"[DARKSEEK ADMIN PASSWORD] shown only once - save immediately!", flush=True)
+        print(f"{'='*50}\n", flush=True)
+
+
 def run_numbered_migrations(conn: sqlite3.Connection) -> None:
     """Apply any not-yet-applied numbered migrations, each in its own transaction.
 

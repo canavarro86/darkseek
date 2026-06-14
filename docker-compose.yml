@@ -13,6 +13,8 @@ services:
     volumes:
       - ./tor/torrc:/etc/tor/torrc:ro
       - /opt/onion_hidden_keys:/tmp/hidden_service
+      - /opt/onion_public_keys:/tmp/hidden_service_public
+      - /opt/onion_admin_keys:/tmp/hidden_service_admin
     # Normalize the hidden-service key directory before launching tor. Tor
     # refuses to publish (upload the descriptor to the HSDirs) unless that
     # directory is private (mode 0700) and owned by the user tor runs as. The
@@ -26,12 +28,18 @@ services:
       - -c
       - |
         set -e
-        mkdir -p /tmp/hidden_service
-        chown -R root:root /tmp/hidden_service
-        chmod 700 /tmp/hidden_service
-        if [ -f /tmp/hidden_service/hs_ed25519_secret_key ]; then
-          chmod 600 /tmp/hidden_service/hs_ed25519_secret_key
-        fi
+        # Normalize every hidden-service key directory the same way. Tor refuses
+        # to publish a descriptor unless each dir is mode 0700 and owned by the
+        # user tor runs as; the secret key must be 0600. Same rationale as the
+        # single-dir case above, applied to the two new bind mounts.
+        for hs in /tmp/hidden_service /tmp/hidden_service_public /tmp/hidden_service_admin; do
+          mkdir -p "$hs"
+          chown -R root:root "$hs"
+          chmod 700 "$hs"
+          if [ -f "$hs/hs_ed25519_secret_key" ]; then
+            chmod 600 "$hs/hs_ed25519_secret_key"
+          fi
+        done
         echo "[entrypoint] hidden_service permissions normalized; starting tor"
         # Bootstrap progress is logged at notice level (see torrc Log directive).
         exec tor -f /etc/tor/torrc
