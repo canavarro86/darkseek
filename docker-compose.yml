@@ -28,10 +28,6 @@ services:
       - -c
       - |
         set -e
-        # Normalize every hidden-service key directory the same way. Tor refuses
-        # to publish a descriptor unless each dir is mode 0700 and owned by the
-        # user tor runs as; the secret key must be 0600. Same rationale as the
-        # single-dir case above, applied to the two new bind mounts.
         for hs in /tmp/hidden_service /tmp/hidden_service_public /tmp/hidden_service_admin; do
           mkdir -p "$$hs"
           chown -R root:root "$$hs"
@@ -40,9 +36,23 @@ services:
             chmod 600 "$$hs/hs_ed25519_secret_key"
           fi
         done
-        echo "[entrypoint] hidden_service permissions normalized; starting tor"
-        # Bootstrap progress is logged at notice level (see torrc Log directive).
-        exec tor -f /etc/tor/torrc
+        echo "[entrypoint] hidden_service permissions normalized"
+        NGINX_IP=""
+        for i in $(seq 1 30); do
+          NGINX_IP=$(getent hosts nginx | awk '{ print $$1 }')
+          [ -n "$$NGINX_IP" ] && break
+          echo "[entrypoint] waiting for nginx DNS... attempt $$i/30"
+          sleep 2
+        done
+        if [ -z "$$NGINX_IP" ]; then
+          echo "[entrypoint] ERROR: could not resolve nginx IP after 60s"
+          exit 1
+        fi
+        echo "[entrypoint] resolved nginx IP: $$NGINX_IP"
+        sed "s/NGINX_IP/$$NGINX_IP/g" /etc/tor/torrc > /tmp/torrc_resolved
+        exec tor -f /tmp/torrc_resolved
+    depends_on:
+      - nginx
     networks:
       - darkseek
     healthcheck:
