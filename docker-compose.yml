@@ -33,11 +33,11 @@ services:
         # user tor runs as; the secret key must be 0600. Same rationale as the
         # single-dir case above, applied to the two new bind mounts.
         for hs in /tmp/hidden_service /tmp/hidden_service_public /tmp/hidden_service_admin; do
-          mkdir -p "$hs"
-          chown -R root:root "$hs"
-          chmod 700 "$hs"
-          if [ -f "$hs/hs_ed25519_secret_key" ]; then
-            chmod 600 "$hs/hs_ed25519_secret_key"
+          mkdir -p "$$hs"
+          chown -R root:root "$$hs"
+          chmod 700 "$$hs"
+          if [ -f "$$hs/hs_ed25519_secret_key" ]; then
+            chmod 600 "$$hs/hs_ed25519_secret_key"
           fi
         done
         echo "[entrypoint] hidden_service permissions normalized; starting tor"
