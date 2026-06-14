@@ -51,8 +51,6 @@ services:
         echo "[entrypoint] resolved nginx IP: $$NGINX_IP"
         sed "s/NGINX_IP/$$NGINX_IP/g" /etc/tor/torrc > /tmp/torrc_resolved
         exec tor -f /tmp/torrc_resolved
-    depends_on:
-      - nginx
     networks:
       - darkseek
     healthcheck:
