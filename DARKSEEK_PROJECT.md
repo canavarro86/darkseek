@@ -21,6 +21,19 @@
 - [x] API /health, /stats, /metrics, /api/search, /api/submit, /api/search-stats работают ✅
 - [x] Поиск работает: фронтенд рендерит результаты с датами ✅
 - [x] БД: 74,550 страниц проиндексировано (растёт) ✅
+- [x] Три Tor Hidden Service настроены:
+  - Старый поисковик (legacy): 37mj2uc7sls76pah7op7xeq7nrskfpircrvycpceyifvwftrxiydubyd.onion
+  - Новый vanity поисковик: darkszcni4tmrlpociezfczxh3b3zemlmcfvu7iiv7n242u2eaff5wyd.onion
+  - Админ панель (приватный): adminov3whi5tnbdh2nh4436ozaysyotcsxkjtfn4koyygusmcaphrad.onion
+- [x] Nginx роутинг по Host заголовку — 3 server блока, default_server возвращает 444, прямой доступ по IP заблокирован
+- [x] Админ панель (frontend/admin.html) — терминальный SPA с вкладками: dashboard, pages, removals, users, audit
+- [x] Admin API — JWT авторизация (httpOnly cookie), bcrypt пароли, все эндпоинты /api/admin/*
+- [x] Новые таблицы БД: admins, admin_sessions, removal_requests, admin_audit_log, notifications
+- [x] Superadmin создаётся при первом запуске, пароль выводится в лог контейнера один раз
+- [x] Legal страницы: frontend/terms.html (с формой удаления), frontend/disclaimer.html
+- [x] Ссылки в footer на index.html: Terms of Service | Disclaimer
+- [x] Публичный эндпоинт POST /api/removal-request — rate limit, пишет в removal_requests + notifications
+- [x] БД: 112,119 страниц проиндексировано (75,805 живых, 36,314 мёртвых)
 
 ### ✅ Hardening сервера
 - [x] SSH по ключу, root отключён, порт 2020
@@ -55,6 +68,12 @@
 - [x] Русский поиск: PyStemmer snowball, OR-fallback (форум → найдено) ✅
 - [x] Дедупликация по content_hash ✅
 - [x] CI/CD: health + search + stats проверки после деплоя ✅
+
+### 📋 Очередь
+- [ ] Запустить scripts/normalize_lang.py — схлопнуть en-GB, en-US в en
+- [ ] Запустить scripts/reprocess_ai.py — переобогатить 41,924 страниц с lang='unknown'
+- [ ] Протестировать все вкладки админки в продакшене (поиск страниц, workflow удалений, экспорт audit)
+- [ ] Сменить пароль superadmin после первого входа
 
 ---
 
