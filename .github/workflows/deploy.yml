@@ -42,7 +42,7 @@ jobs:
             # Polls /health every 5s up to 180s; fails the deploy if it never comes up.
             TIMEOUT=180
             ELAPSED=0
-            until curl -sf http://localhost/health > /dev/null 2>&1; do
+            until curl -sf -H "Host: 37mj2uc7sls76pah7op7xeq7nrskfpircrvycpceyifvwftrxiydubyd.onion" http://localhost/health > /dev/null 2>&1; do
               sleep 5
               ELAPSED=$((ELAPSED + 5))
               if [ $ELAPSED -ge $TIMEOUT ]; then
@@ -60,10 +60,10 @@ jobs:
             ok=1
 
             curl -sf --retry 5 --retry-delay 10 --retry-connrefused \
-              http://localhost/health | grep -q '"status":"ok"' || ok=0
+              -H "Host: 37mj2uc7sls76pah7op7xeq7nrskfpircrvycpceyifvwftrxiydubyd.onion" http://localhost/health | grep -q '"status":"ok"' || ok=0
 
             curl -sf --retry 5 --retry-delay 10 --retry-connrefused \
-              "http://localhost/api/search?q=forum" | python3 -c "
+              -H "Host: 37mj2uc7sls76pah7op7xeq7nrskfpircrvycpceyifvwftrxiydubyd.onion" "http://localhost/api/search?q=forum" | python3 -c "
             import sys, json
             d = json.load(sys.stdin)
             assert d['total'] > 0, 'search returned 0 results'
@@ -73,7 +73,7 @@ jobs:
             " || ok=0
 
             curl -sf --retry 5 --retry-delay 10 --retry-connrefused \
-              http://localhost/stats | python3 -c "
+              -H "Host: 37mj2uc7sls76pah7op7xeq7nrskfpircrvycpceyifvwftrxiydubyd.onion" http://localhost/stats | python3 -c "
             import sys, json
             d = json.load(sys.stdin)
             assert d['total_pages'] > 0, 'DB empty'
