@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DarkSeek — Admin</title>
+  <style>
+    :root {
+      --green: #00ff41;
+      --bg: #0a0a0a;
+      --bg-card: #111111;
+      --border: #1a1a1a;
+      --red: #ff4444;
+      --muted: #666666;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--green);
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 13px;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+    a { color: var(--green); }
+    button {
+      font-family: inherit; font-size: 12px;
+      background: rgba(0,255,65,0.06);
+      color: var(--green);
+      border: 1px solid rgba(0,255,65,0.4);
+      padding: 0.4rem 0.7rem; cursor: pointer;
+      transition: background 0.12s;
+    }
+    button:hover:not(:disabled) { background: rgba(0,255,65,0.18); }
+    button:disabled { opacity: 0.35; cursor: not-allowed; }
+    button.danger { border-color: rgba(255,68,68,0.5); color: var(--red); background: rgba(255,68,68,0.05); }
+    button.danger:hover:not(:disabled) { background: rgba(255,68,68,0.15); }
+    input, select, textarea {
+      font-family: inherit; font-size: 12px;
+      background: #050505; color: var(--green);
+      border: 1px solid rgba(0,255,65,0.25);
+      padding: 0.4rem 0.5rem;
+    }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--green); }
+
+    /* Login */
+    .login-wrap { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 1rem; }
+    .login-box {
+      width: 100%; max-width: 380px;
+      border: 1px solid rgba(0,255,65,0.3);
+      background: var(--bg-card); padding: 1.5rem;
+    }
+    .ascii-head { white-space: pre; color: var(--green); font-size: 12px; margin-bottom: 1.2rem; text-align: center; }
+    .login-box .field { margin-bottom: 0.9rem; }
+    .login-box label { display: block; color: var(--muted); font-size: 11px; margin-bottom: 0.3rem; }
+    .login-box input { width: 100%; }
+    .login-box button { width: 100%; margin-top: 0.5rem; }
+    .msg { font-size: 12px; min-height: 1rem; margin-top: 0.7rem; }
+    .msg.err { color: var(--red); }
+    .msg.ok { color: var(--green); }
+
+    /* App shell */
+    .nav {
+      display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;
+      padding: 0.7rem 1rem; border-bottom: 1px solid var(--border);
+      background: var(--bg-card); position: sticky; top: 0; z-index: 50;
+    }
+    .nav .tab {
+      background: transparent; border: 1px solid transparent;
+      padding: 0.35rem 0.7rem;
+    }
+    .nav .tab.active { border-color: rgba(0,255,65,0.5); background: rgba(0,255,65,0.1); }
+    .nav .spacer { flex: 1; }
+    .bell { position: relative; cursor: pointer; padding: 0.35rem 0.6rem; }
+    .bell .badge {
+      position: absolute; top: -4px; right: -4px;
+      background: var(--red); color: #fff; border-radius: 8px;
+      font-size: 10px; padding: 0 4px; min-width: 14px; text-align: center;
+    }
+    .container { padding: 1.2rem; max-width: 1200px; margin: 0 auto; }
+
+    h2.section { font-size: 14px; margin: 1.2rem 0 0.6rem; color: var(--green); }
+    h2.section:first-child { margin-top: 0; }
+
+    .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.8rem; margin-bottom: 1rem; }
+    .card { border: 1px solid var(--border); background: var(--bg-card); padding: 1rem; }
+    .card .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+    .card .value { font-size: 26px; margin-top: 0.3rem; }
+
+    table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; font-size: 12px; }
+    th, td { text-align: left; padding: 0.45rem 0.5rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 1px; }
+    td.actions { white-space: nowrap; }
+    td input, td select { width: 100%; }
+
+    .toolbar { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-bottom: 0.8rem; }
+    .filter-tabs { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.8rem; }
+    .filter-tabs .ft.active { border-color: rgba(0,255,65,0.6); background: rgba(0,255,65,0.12); }
+    .pager { display: flex; gap: 0.7rem; align-items: center; margin-top: 0.5rem; color: var(--muted); }
+    .inline-form { border: 1px solid var(--border); background: var(--bg-card); padding: 1rem; margin-bottom: 1rem; display: grid; gap: 0.6rem; grid-template-columns: 1fr 1fr; }
+    .inline-form .full { grid-column: 1 / -1; }
+    .inline-form label { display: block; color: var(--muted); font-size: 11px; margin-bottom: 0.25rem; }
+    .inline-form input, .inline-form select, .inline-form textarea { width: 100%; }
+    .muted { color: var(--muted); }
+    .hidden { display: none; }
+    .overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 100;
+      display: flex; justify-content: flex-end;
+    }
+    .overlay .panel {
+      width: 360px; max-width: 90vw; height: 100%; overflow-y: auto;
+      background: var(--bg-card); border-left: 1px solid rgba(0,255,65,0.3); padding: 1rem;
+    }
+    .notif { border-bottom: 1px solid var(--border); padding: 0.6rem 0; font-size: 12px; }
+    .notif.unread { color: var(--green); }
+    .notif.read { color: var(--muted); }
+    .badge-pill { font-size: 10px; padding: 1px 5px; border: 1px solid currentColor; }
+
+    @media (max-width: 700px) {
+      .cards { grid-template-columns: 1fr; }
+      .inline-form { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+// ---- Global state ----
+const state = {
+  currentTab: 'dashboard',
+  currentAdmin: null,   // {role: 'superadmin'|'admin'}
+  dashboardData: null,
+  notifications: [],
+  pagesPage: 1,
+  removalsStatus: 'all',
+  removalsPage: 1,
+  auditPage: 1,
+  auditFilters: { admin_id: '', action: '' },
+  editingPageId: null,
+  refreshTimer: null,
+};
+
+const app = document.getElementById('app');
+
+// ---- API helper ----
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    ...opts,
+  });
+  if (res.status === 401) {
+    stopRefresh();
+    showLogin();
+    throw new Error('unauthorized');
+  }
+  return res;
+}
+
+function num(n) { return (n == null ? 0 : n).toLocaleString(); }
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+function trunc(s, n) { s = String(s || ''); return s.length > n ? s.slice(0, n) + '…' : s; }
+
+function showLoading(container) { container.innerHTML = '<p class="muted">&gt; loading...</p>'; }
+function showError(container, message) {
+  const p = document.createElement('p');
+  p.className = 'msg err';
+  p.textContent = message;
+  container.appendChild(p);
+}
+
+// ---- Init ----
+async function init() {
+  try {
+    const res = await fetch('/api/admin/dashboard', { credentials: 'include' });
+    if (res.status === 401) { showLogin(); return; }
+    state.dashboardData = await res.json();
+    await determineRole();
+    showDashboard();
+  } catch (e) {
+    showLogin();
+  }
+}
+
+// Role is carried in the httpOnly JWT (unreadable from JS). Probe the
+// superadmin-only users endpoint to learn the current role on a fresh load.
+async function determineRole() {
+  if (state.currentAdmin && state.currentAdmin.role) return;
+  try {
+    const res = await fetch('/api/admin/users', { credentials: 'include' });
+    state.currentAdmin = { role: res.status === 200 ? 'superadmin' : 'admin' };
+  } catch (e) {
+    state.currentAdmin = { role: 'admin' };
+  }
+}
+
+// ---- Login ----
+function showLogin() {
+  state.currentAdmin = null;
+  app.innerHTML = `
+    <div class="login-wrap">
+      <div class="login-box">
+        <div class="ascii-head">+============================+
+|   DARKSEEK ADMIN ACCESS    |
++============================+</div>
+        <div class="field">
+          <label>username</label>
+          <input id="login-user" autocomplete="username" />
+        </div>
+        <div class="field">
+          <label>password</label>
+          <input id="login-pass" type="password" autocomplete="current-password" />
+        </div>
+        <button id="login-btn">&gt; authenticate</button>
+        <div class="msg" id="login-msg"></div>
+      </div>
+    </div>`;
+  const btn = document.getElementById('login-btn');
+  const msg = document.getElementById('login-msg');
+  const submit = async () => {
+    msg.className = 'msg';
+    msg.textContent = '> authenticating...';
+    try {
+      const res = await fetch('/api/admin/login', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: document.getElementById('login-user').value.trim(),
+          password: document.getElementById('login-pass').value,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        state.currentAdmin = { role: data.role };
+        const d = await fetch('/api/admin/dashboard', { credentials: 'include' });
+        state.dashboardData = await d.json();
+        showDashboard();
+      } else {
+        msg.className = 'msg err';
+        msg.textContent = '> ' + (data.error || 'login failed');
+      }
+    } catch (e) {
+      msg.className = 'msg err';
+      msg.textContent = '> network error';
+    }
+  };
+  btn.addEventListener('click', submit);
+  document.getElementById('login-pass').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+}
+
+// ---- App shell ----
+function shell(activeTab, bodyHtml) {
+  const unread = state.dashboardData ? state.dashboardData.unread_notifications : 0;
+  const tabs = ['dashboard', 'pages', 'removals', 'users', 'audit'];
+  app.innerHTML = `
+    <div class="nav">
+      ${tabs.map(t => `<button class="tab ${t === activeTab ? 'active' : ''}" data-tab="${t}">[${t}]</button>`).join('')}
+      <span class="spacer"></span>
+      <span class="bell" id="bell">🔔<span class="badge" ${unread ? '' : 'style="display:none"'}>${num(unread)}</span></span>
+      <button id="logout-btn">&gt;&gt; logout</button>
+    </div>
+    <div class="container" id="tab-body">${bodyHtml}</div>`;
+  app.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+  document.getElementById('logout-btn').addEventListener('click', logout);
+  document.getElementById('bell').addEventListener('click', showNotifications);
+}
+
+function showTab(name) {
+  state.currentTab = name;
+  if (name !== 'dashboard') stopRefresh();
+  if (name === 'dashboard') showDashboard();
+  else if (name === 'pages') showPages();
+  else if (name === 'removals') showRemovals();
+  else if (name === 'users') showUsers();
+  else if (name === 'audit') showAudit();
+}
+
+async function logout() {
+  try { await fetch('/api/admin/logout', { method: 'POST', credentials: 'include' }); } catch (e) {}
+  stopRefresh();
+  showLogin();
+}
+
+function stopRefresh() { if (state.refreshTimer) { clearInterval(state.refreshTimer); state.refreshTimer = null; } }
+
+// ---- Dashboard ----
+async function showDashboard() {
+  stopRefresh();
+  if (!state.dashboardData) {
+    const res = await api('/api/admin/dashboard');
+    state.dashboardData = await res.json();
+  }
+  renderDashboard();
+  state.refreshTimer = setInterval(async () => {
+    try {
+      const res = await api('/api/admin/dashboard');
+      state.dashboardData = await res.json();
+      if (state.currentTab === 'dashboard') renderDashboard();
+    } catch (e) {}
+  }, 30000);
+}
+
+function pct(part, total) { return total > 0 ? ((part / total) * 100).toFixed(1) + '%' : '0%'; }
+
+function renderDashboard() {
+  const d = state.dashboardData;
+  const total = d.total_pages;
+  const catRows = Object.entries(d.by_category || {})
+    .map(([k, v]) => `<tr><td>${esc(k)}</td><td>${num(v)}</td><td class="muted">${pct(v, total)}</td></tr>`).join('');
+  const langRows = Object.entries(d.by_lang || {})
+    .map(([k, v]) => `<tr><td>${esc(k)}</td><td>${num(v)}</td><td class="muted">${pct(v, total)}</td></tr>`).join('');
+  const notifRows = (state.notifications.length ? state.notifications : [])
+    .slice(0, 10)
+    .map(n => `<div class="notif ${n.is_read ? 'read' : 'unread'}">${esc(n.message)} <span class="muted">— ${esc(n.created_at)}</span></div>`).join('')
+    || '<p class="muted">&gt; no notifications loaded</p>';
+  const auditRows = (d.recent_audit || [])
+    .map(a => `<tr><td class="muted">${esc(a.created_at)}</td><td>${esc(a.username || '—')}</td><td>${esc(a.action)}</td><td>${esc(trunc(a.target, 40))}</td></tr>`).join('')
+    || '<tr><td colspan="4" class="muted">&gt; no activity</td></tr>';
+
+  const body = `
+    <h2 class="section">&gt; dashboard</h2>
+    <div class="cards">
+      <div class="card"><div class="label">total pages</div><div class="value">${num(d.total_pages)}</div></div>
+      <div class="card"><div class="label">alive</div><div class="value">${num(d.alive_pages)}</div></div>
+      <div class="card"><div class="label">dead</div><div class="value">${num(d.dead_pages)}</div></div>
+    </div>
+    <div class="cards">
+      <div class="card"><div class="label">today</div><div class="value">${num(d.pages_today)}</div></div>
+      <div class="card"><div class="label">7 days</div><div class="value">${num(d.pages_7d)}</div></div>
+      <div class="card"><div class="label">30 days</div><div class="value">${num(d.pages_30d)}</div></div>
+    </div>
+    <h2 class="section">by category</h2>
+    <table><thead><tr><th>category</th><th>count</th><th>percent</th></tr></thead><tbody>${catRows}</tbody></table>
+    <h2 class="section">by language</h2>
+    <table><thead><tr><th>lang</th><th>count</th><th>percent</th></tr></thead><tbody>${langRows}</tbody></table>
+    <h2 class="section">notifications <button id="markread" style="margin-left:0.6rem">[mark all read]</button></h2>
+    <div id="dash-notifs">${notifRows}</div>
+    <h2 class="section">recent activity</h2>
+    <table><thead><tr><th>time</th><th>admin</th><th>action</th><th>target</th></tr></thead><tbody>${auditRows}</tbody></table>`;
+  shell('dashboard', body);
+  // Load notifications for the dashboard list if not yet present.
+  if (!state.notifications.length) loadNotifications().then(() => { if (state.currentTab === 'dashboard') renderDashboard(); });
+  const mr = document.getElementById('markread');
+  if (mr) mr.addEventListener('click', markAllRead);
+}
+
+// ---- Notifications ----
+async function loadNotifications() {
+  try {
+    const res = await api('/api/admin/notifications');
+    const data = await res.json();
+    state.notifications = data.notifications || [];
+  } catch (e) {}
+}
+
+async function markAllRead() {
+  try {
+    await api('/api/admin/notifications/read-all', { method: 'POST' });
+    state.notifications = state.notifications.map(n => ({ ...n, is_read: 1 }));
+    const res = await api('/api/admin/dashboard');
+    state.dashboardData = await res.json();
+    if (state.currentTab === 'dashboard') renderDashboard();
+  } catch (e) {}
+}
+
+async function showNotifications() {
+  await loadNotifications();
+  const rows = state.notifications.length
+    ? state.notifications.map(n => `<div class="notif ${n.is_read ? 'read' : 'unread'}">${esc(n.message)}<br><span class="muted">${esc(n.created_at)}</span></div>`).join('')
+    : '<p class="muted">&gt; no notifications</p>';
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `<div class="panel">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.8rem">
+      <strong>notifications</strong>
+      <button id="notif-readall">[mark all read]</button>
+    </div>${rows}</div>`;
+  ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
+  document.body.appendChild(ov);
+  document.getElementById('notif-readall').addEventListener('click', async () => { await markAllRead(); ov.remove(); });
+}
+
+// ---- Pages ----
+async function showPages() {
+  shell('pages', '<div id="tab-body-inner"></div>');
+  const inner = document.getElementById('tab-body-inner');
+  inner.innerHTML = `
+    <h2 class="section">&gt; pages</h2>
+    <div class="toolbar">
+      <input id="p-q" placeholder="search text or http..." style="min-width:200px" />
+      <select id="p-cat"><option value="">all categories</option>
+        ${['forum','market','news','wiki','service','other'].map(c => `<option value="${c}">${c}</option>`).join('')}</select>
+      <input id="p-lang" placeholder="lang" style="width:70px" />
+      <select id="p-alive"><option value="">all</option><option value="alive">alive</option><option value="dead">dead</option></select>
+      <button id="p-search">[search]</button>
+      <button id="p-add">[+ add page]</button>
+    </div>
+    <div id="p-addform" class="inline-form hidden"></div>
+    <div id="p-results"><p class="muted">&gt; loading...</p></div>`;
+  document.getElementById('p-search').addEventListener('click', () => { state.pagesPage = 1; loadPages(); });
+  document.getElementById('p-q').addEventListener('keydown', e => { if (e.key === 'Enter') { state.pagesPage = 1; loadPages(); } });
+  document.getElementById('p-add').addEventListener('click', toggleAddPage);
+  loadPages();
+}
+
+function pagesQuery() {
+  const params = new URLSearchParams();
+  const q = document.getElementById('p-q').value.trim();
+  const cat = document.getElementById('p-cat').value;
+  const lang = document.getElementById('p-lang').value.trim();
+  const alive = document.getElementById('p-alive').value;
+  if (q) params.set('q', q);
+  if (cat) params.set('category', cat);
+  if (lang) params.set('lang', lang);
+  if (alive) params.set('alive', alive);
+  params.set('page', state.pagesPage);
+  params.set('per_page', 50);
+  return params.toString();
+}
+
+async function loadPages() {
+  const box = document.getElementById('p-results');
+  showLoading(box);
+  try {
+    const res = await api('/api/admin/pages?' + pagesQuery());
+    if (!res.ok) { box.innerHTML = ''; showError(box, '> invalid search query'); return; }
+    const data = await res.json();
+    renderPages(data);
+  } catch (e) {}
+}
+
+function renderPages(data) {
+  const box = document.getElementById('p-results');
+  const isSuper = state.currentAdmin && state.currentAdmin.role === 'superadmin';
+  const rows = data.pages.map(p => {
+    if (state.editingPageId === p.id) {
+      return `<tr data-id="${p.id}">
+        <td>${p.id}</td>
+        <td title="${esc(p.url)}">${esc(trunc(p.url, 50))}</td>
+        <td><input id="e-title" value="${esc(p.title)}"></td>
+        <td><select id="e-cat">${['forum','market','news','wiki','service','other'].map(c => `<option value="${c}" ${c === p.category ? 'selected' : ''}>${c}</option>`).join('')}</select></td>
+        <td><input id="e-lang" value="${esc(p.lang)}" style="width:60px"></td>
+        <td><select id="e-alive"><option value="1" ${p.is_alive ? 'selected' : ''}>alive</option><option value="0" ${!p.is_alive ? 'selected' : ''}>dead</option></select></td>
+        <td class="muted">${esc(p.indexed_at)}</td>
+        <td class="actions"><button data-act="save" data-id="${p.id}">[save]</button> <button data-act="cancel">[cancel]</button>
+          <div class="full"><input id="e-desc" value="${esc(p.description)}" placeholder="description" style="width:100%;margin-top:4px"></div></td>
+      </tr>`;
+    }
+    return `<tr data-id="${p.id}">
+      <td>${p.id}</td>
+      <td title="${esc(p.url)}"><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(trunc(p.url, 50))}</a></td>
+      <td>${esc(trunc(p.title, 40))}</td>
+      <td>${esc(p.category)}</td>
+      <td>${esc(p.lang)}</td>
+      <td>${p.is_alive ? 'yes' : '<span style="color:var(--red)">no</span>'}</td>
+      <td class="muted">${esc(p.indexed_at)}</td>
+      <td class="actions">
+        <button data-act="edit" data-id="${p.id}">[edit]</button>
+        <button class="danger" data-act="del" data-id="${p.id}" ${isSuper ? '' : 'disabled title="superadmin only"'}>[del]</button>
+      </td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="8" class="muted">&gt; no results</td></tr>';
+
+  box.innerHTML = `
+    <table><thead><tr><th>id</th><th>url</th><th>title</th><th>cat</th><th>lang</th><th>alive</th><th>date</th><th>actions</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    <div class="pager">
+      <button data-act="prev" ${data.page <= 1 ? 'disabled' : ''}>[&lt; prev]</button>
+      <span>page ${num(data.page)} of ${num(Math.max(1, data.total_pages))}</span>
+      <button data-act="next" ${data.page >= data.total_pages ? 'disabled' : ''}>[next &gt;]</button>
+      <span class="muted">(${num(data.total)} total)</span>
+    </div>`;
+
+  box.querySelectorAll('button[data-act]').forEach(b => b.addEventListener('click', () => {
+    const act = b.dataset.act;
+    const id = parseInt(b.dataset.id, 10);
+    if (act === 'edit') { state.editingPageId = id; renderPages(data); }
+    else if (act === 'cancel') { state.editingPageId = null; renderPages(data); }
+    else if (act === 'save') savePage(id);
+    else if (act === 'del') deletePage(id);
+    else if (act === 'prev') { state.pagesPage = Math.max(1, state.pagesPage - 1); loadPages(); }
+    else if (act === 'next') { state.pagesPage += 1; loadPages(); }
+  }));
+}
+
+async function savePage(id) {
+  const payload = {
+    title: document.getElementById('e-title').value,
+    description: document.getElementById('e-desc').value,
+    category: document.getElementById('e-cat').value,
+    lang: document.getElementById('e-lang').value,
+    is_alive: parseInt(document.getElementById('e-alive').value, 10),
+  };
+  try {
+    await api('/api/admin/pages/' + id, { method: 'PUT', body: JSON.stringify(payload) });
+    state.editingPageId = null;
+    loadPages();
+  } catch (e) {}
+}
+
+async function deletePage(id) {
+  if (!confirm('Delete this page?')) return;
+  try {
+    const res = await api('/api/admin/pages/' + id, { method: 'DELETE' });
+    if (res.ok) loadPages();
+    else alert('Delete failed');
+  } catch (e) {}
+}
+
+function toggleAddPage() {
+  const f = document.getElementById('p-addform');
+  if (!f.classList.contains('hidden')) { f.classList.add('hidden'); f.innerHTML = ''; return; }
+  f.classList.remove('hidden');
+  f.innerHTML = `
+    <div class="full"><label>url</label><input id="a-url" placeholder="http://example.onion"></div>
+    <div><label>title</label><input id="a-title"></div>
+    <div><label>lang</label><input id="a-lang" placeholder="en"></div>
+    <div><label>category</label><select id="a-cat">${['forum','market','news','wiki','service','other'].map(c => `<option value="${c}">${c}</option>`).join('')}</select></div>
+    <div class="full"><label>description</label><textarea id="a-desc" rows="2"></textarea></div>
+    <div class="full"><button id="a-save">[save]</button> <button id="a-cancel">[cancel]</button> <span class="msg" id="a-msg"></span></div>`;
+  document.getElementById('a-cancel').addEventListener('click', toggleAddPage);
+  document.getElementById('a-save').addEventListener('click', addPage);
+}
+
+async function addPage() {
+  const msg = document.getElementById('a-msg');
+  msg.className = 'msg';
+  const payload = {
+    url: document.getElementById('a-url').value.trim(),
+    title: document.getElementById('a-title').value.trim(),
+    description: document.getElementById('a-desc').value.trim(),
+    category: document.getElementById('a-cat').value,
+    lang: document.getElementById('a-lang').value.trim(),
+  };
+  try {
+    const res = await api('/api/admin/pages', { method: 'POST', body: JSON.stringify(payload) });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) { toggleAddPage(); state.pagesPage = 1; loadPages(); }
+    else { msg.className = 'msg err'; msg.textContent = data.error || 'failed'; }
+  } catch (e) {}
+}
+
+// ---- Removals ----
+function showRemovals() {
+  shell('removals', '<div id="tab-body-inner"></div>');
+  const inner = document.getElementById('tab-body-inner');
+  const statuses = ['all', 'pending', 'reviewed', 'removed', 'rejected'];
+  inner.innerHTML = `
+    <h2 class="section">&gt; removals</h2>
+    <div class="filter-tabs">
+      ${statuses.map(s => `<button class="ft ${s === state.removalsStatus ? 'active' : ''}" data-status="${s}">[${s}]</button>`).join('')}
+    </div>
+    <div id="r-results"><p class="muted">&gt; loading...</p></div>`;
+  inner.querySelectorAll('.ft').forEach(b => b.addEventListener('click', () => {
+    state.removalsStatus = b.dataset.status; state.removalsPage = 1; showRemovals();
+  }));
+  loadRemovals();
+}
+
+async function loadRemovals() {
+  const box = document.getElementById('r-results');
+  showLoading(box);
+  const params = new URLSearchParams();
+  if (state.removalsStatus !== 'all') params.set('status', state.removalsStatus);
+  params.set('page', state.removalsPage);
+  params.set('per_page', 50);
+  try {
+    const res = await api('/api/admin/removals?' + params.toString());
+    const data = await res.json();
+    renderRemovals(data);
+  } catch (e) {}
+}
+
+function renderRemovals(data) {
+  const box = document.getElementById('r-results');
+  const rows = data.removals.map(r => {
+    const actions = r.status === 'pending'
+      ? `<button data-act="approve" data-id="${r.id}" data-url="${esc(r.url)}">[✓ approve]</button>
+         <button class="danger" data-act="reject" data-id="${r.id}">[✗ reject]</button>`
+      : `<span class="muted">${esc(r.reviewer || '—')}</span>`;
+    return `<tr>
+      <td>${r.id}</td>
+      <td title="${esc(r.url)}">${esc(trunc(r.url, 40))}</td>
+      <td>${esc(r.reason)}</td>
+      <td>${esc(trunc(r.description, 80))}</td>
+      <td>${esc(r.status)}</td>
+      <td class="muted">${esc(r.created_at)}</td>
+      <td class="actions">${actions}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="7" class="muted">&gt; no removal requests</td></tr>';
+
+  box.innerHTML = `
+    <table><thead><tr><th>id</th><th>url</th><th>reason</th><th>description</th><th>status</th><th>date</th><th>actions</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    <div class="pager">
+      <button data-act="prev" ${data.page <= 1 ? 'disabled' : ''}>[&lt; prev]</button>
+      <span>page ${num(data.page)} of ${num(Math.max(1, data.total_pages))}</span>
+      <button data-act="next" ${data.page >= data.total_pages ? 'disabled' : ''}>[next &gt;]</button>
+      <span class="muted">(${num(data.total)} total)</span>
+    </div>`;
+
+  box.querySelectorAll('button[data-act]').forEach(b => b.addEventListener('click', () => {
+    const act = b.dataset.act;
+    if (act === 'approve') reviewRemoval(parseInt(b.dataset.id, 10), 'approve', b.dataset.url);
+    else if (act === 'reject') reviewRemoval(parseInt(b.dataset.id, 10), 'reject');
+    else if (act === 'prev') { state.removalsPage = Math.max(1, state.removalsPage - 1); loadRemovals(); }
+    else if (act === 'next') { state.removalsPage += 1; loadRemovals(); }
+  }));
+}
+
+async function reviewRemoval(id, action, url) {
+  let notes = '';
+  if (action === 'approve') {
+    if (!confirm('Remove ' + url + ' from index?')) return;
+  } else {
+    notes = prompt('Reason for rejection (optional):') || '';
+  }
+  try {
+    await api('/api/admin/removals/' + id, { method: 'PUT', body: JSON.stringify({ action, notes }) });
+    loadRemovals();
+  } catch (e) {}
+}
+
+// ---- Users ----
+function showUsers() {
+  shell('users', '<div id="tab-body-inner"></div>');
+  const inner = document.getElementById('tab-body-inner');
+  if (!state.currentAdmin || state.currentAdmin.role !== 'superadmin') {
+    inner.innerHTML = '<h2 class="section">&gt; users</h2><p class="muted">&gt; access denied. superadmin only.</p>';
+    return;
+  }
+  inner.innerHTML = `
+    <h2 class="section">&gt; users</h2>
+    <div id="u-addform" class="inline-form">
+      <div><label>username</label><input id="u-name"></div>
+      <div><label>password</label><input id="u-pass" type="password"></div>
+      <div><label>role</label><select id="u-role"><option value="admin">admin</option><option value="superadmin">superadmin</option></select></div>
+      <div class="full"><button id="u-create">[+ create user]</button> <span class="msg" id="u-msg"></span></div>
+    </div>
+    <div id="u-results"><p class="muted">&gt; loading...</p></div>`;
+  document.getElementById('u-create').addEventListener('click', createUser);
+  loadUsers();
+}
+
+async function loadUsers() {
+  const box = document.getElementById('u-results');
+  showLoading(box);
+  try {
+    const res = await api('/api/admin/users');
+    const data = await res.json();
+    renderUsers(data.users || []);
+  } catch (e) {}
+}
+
+function renderUsers(users) {
+  const box = document.getElementById('u-results');
+  const rows = users.map(u => `
+    <tr>
+      <td>${esc(u.username)}</td>
+      <td>${esc(u.role)}</td>
+      <td class="muted">${esc(u.last_login || 'never')}</td>
+      <td>${u.is_active ? 'active' : '<span style="color:var(--red)">inactive</span>'}</td>
+      <td class="actions">
+        <button class="danger" data-id="${u.id}" ${u.is_active ? '' : 'disabled'}>[deactivate]</button>
+      </td>
+    </tr>`).join('');
+  box.innerHTML = `<table><thead><tr><th>username</th><th>role</th><th>last login</th><th>status</th><th>actions</th></tr></thead><tbody>${rows}</tbody></table>`;
+  box.querySelectorAll('button[data-id]').forEach(b => b.addEventListener('click', () => deactivateUser(parseInt(b.dataset.id, 10))));
+}
+
+async function createUser() {
+  const msg = document.getElementById('u-msg');
+  msg.className = 'msg';
+  const payload = {
+    username: document.getElementById('u-name').value.trim(),
+    password: document.getElementById('u-pass').value,
+    role: document.getElementById('u-role').value,
+  };
+  try {
+    const res = await api('/api/admin/users', { method: 'POST', body: JSON.stringify(payload) });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) { document.getElementById('u-name').value = ''; document.getElementById('u-pass').value = ''; loadUsers(); }
+    else { msg.className = 'msg err'; msg.textContent = data.error || 'failed'; }
+  } catch (e) {}
+}
+
+async function deactivateUser(id) {
+  if (!confirm('Deactivate this user?')) return;
+  try {
+    const res = await api('/api/admin/users/' + id + '/deactivate', { method: 'PUT' });
+    if (res.ok) loadUsers();
+    else { const d = await res.json().catch(() => ({})); alert(d.error || 'failed'); }
+  } catch (e) {}
+}
+
+// ---- Audit ----
+function showAudit() {
+  shell('audit', '<div id="tab-body-inner"></div>');
+  const inner = document.getElementById('tab-body-inner');
+  inner.innerHTML = `
+    <h2 class="section">&gt; audit</h2>
+    <div class="toolbar">
+      <select id="au-admin"><option value="">all admins</option></select>
+      <input id="au-action" placeholder="action" />
+      <button id="au-filter">[filter]</button>
+      <button id="au-export">[export csv]</button>
+    </div>
+    <div id="au-results"><p class="muted">&gt; loading...</p></div>`;
+  document.getElementById('au-filter').addEventListener('click', () => {
+    state.auditFilters.admin_id = document.getElementById('au-admin').value;
+    state.auditFilters.action = document.getElementById('au-action').value.trim();
+    state.auditPage = 1; loadAudit();
+  });
+  document.getElementById('au-export').addEventListener('click', exportAudit);
+  populateAuditAdmins();
+  loadAudit();
+}
+
+async function populateAuditAdmins() {
+  if (!state.currentAdmin || state.currentAdmin.role !== 'superadmin') return;
+  try {
+    const res = await api('/api/admin/users');
+    if (!res.ok) return;
+    const data = await res.json();
+    const sel = document.getElementById('au-admin');
+    (data.users || []).forEach(u => {
+      const o = document.createElement('option');
+      o.value = u.id; o.textContent = u.username;
+      sel.appendChild(o);
+    });
+  } catch (e) {}
+}
+
+async function loadAudit() {
+  const box = document.getElementById('au-results');
+  showLoading(box);
+  const params = new URLSearchParams();
+  if (state.auditFilters.admin_id) params.set('admin_id', state.auditFilters.admin_id);
+  if (state.auditFilters.action) params.set('action', state.auditFilters.action);
+  params.set('page', state.auditPage);
+  params.set('per_page', 50);
+  try {
+    const res = await api('/api/admin/audit?' + params.toString());
+    const data = await res.json();
+    renderAudit(data);
+  } catch (e) {}
+}
+
+function renderAudit(data) {
+  const box = document.getElementById('au-results');
+  const rows = data.audit.map(a => `
+    <tr>
+      <td class="muted">${esc(a.created_at)}</td>
+      <td>${esc(a.username || '—')}</td>
+      <td>${esc(a.action)}</td>
+      <td>${esc(trunc(a.target, 40))}</td>
+      <td class="muted">${esc((a.ip_hash || '').slice(0, 16))}</td>
+    </tr>`).join('') || '<tr><td colspan="5" class="muted">&gt; no entries</td></tr>';
+  box.innerHTML = `
+    <table><thead><tr><th>timestamp</th><th>admin</th><th>action</th><th>target</th><th>ip_hash</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="pager">
+      <button data-act="prev" ${data.page <= 1 ? 'disabled' : ''}>[&lt; prev]</button>
+      <span>page ${num(data.page)} of ${num(Math.max(1, data.total_pages))}</span>
+      <button data-act="next" ${data.page >= data.total_pages ? 'disabled' : ''}>[next &gt;]</button>
+      <span class="muted">(${num(data.total)} total)</span>
+    </div>`;
+  box.querySelectorAll('button[data-act]').forEach(b => b.addEventListener('click', () => {
+    if (b.dataset.act === 'prev') { state.auditPage = Math.max(1, state.auditPage - 1); loadAudit(); }
+    else { state.auditPage += 1; loadAudit(); }
+  }));
+}
+
+async function exportAudit() {
+  try {
+    const res = await api('/api/admin/export/audit');
+    if (!res.ok) { alert('export failed'); return; }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'audit_log.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {}
+}
+
+// ---- Boot ----
+init();
+</script>
+</body>
+</html>

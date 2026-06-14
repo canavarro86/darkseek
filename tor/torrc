@@ -5,3 +5,11 @@ HiddenServiceDir /tmp/hidden_service/
 HiddenServicePort 80 nginx:80
 SocksTimeout 30
 CircuitStreamTimeout 30
+
+# New vanity public search address
+HiddenServiceDir /tmp/hidden_service_public/
+HiddenServicePort 80 nginx:80
+
+# Admin panel - private address, keep secret
+HiddenServiceDir /tmp/hidden_service_admin/
+HiddenServicePort 80 nginx:80
