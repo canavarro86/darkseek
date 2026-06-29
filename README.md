@@ -8,7 +8,6 @@
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
 
 **Live (Tor):** `37mj2uc7sls76pah7op7xeq7nrskfpircrvycpceyifvwftrxiydubyd.onion`
-**Live (Clearnet):** `http://95.179.142.200`
 
 ---
 
