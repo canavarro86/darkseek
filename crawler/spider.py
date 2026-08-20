@@ -74,9 +74,20 @@ EMPTY_QUEUE_SLEEP = float(os.environ.get("EMPTY_QUEUE_SLEEP", "60"))
 # Batch DB writes: accumulate this many successful results, then write once.
 BATCH_WRITE_SIZE = int(os.environ.get("BATCH_WRITE_SIZE", "10"))
 
-# --- Memory bounds (1GB box, crawler budget 256MB) --------------------------
-RSS_LIMIT_MB = 250.0            # restart the crawler if RSS exceeds this
-WATCHDOG_INTERVAL = 15.0        # seconds between RSS checks
+# --- Memory bounds (1GB box, crawler mem_limit 250MB) ------------------------
+# RSS_LIMIT_MB is deliberately BELOW the container's cgroup mem_limit (250m in
+# docker-compose.yml), not equal to it. Two reasons a margin is required:
+#   1. VmRSS (self-reported here) undercounts what the cgroup OOM killer measures
+#      — cgroup accounting also includes page cache for mmap'd shared libraries,
+#      socket buffers, and kernel memory that don't show up in our own RSS read.
+#   2. WATCHDOG_INTERVAL is a polling gap, not a real-time guarantee; a fast
+#      allocation spike between two checks can blow past the limit before the
+#      next tick fires.
+# 200/250 leaves ~20% headroom for both effects. Tightened together with the
+# fetch() body-size cap (see MAX_BODY_BYTES), which removes the single largest
+# spike source (an oversized page read into RAM in one shot).
+RSS_LIMIT_MB = 200.0            # restart the crawler if RSS exceeds this
+WATCHDOG_INTERVAL = 10.0        # seconds between RSS checks
 
 
 def _rss_mb() -> float | None:
@@ -242,6 +253,14 @@ SKIP_EXTENSIONS = frozenset({
 # not stall the worker — on timeout we fall through to the normal GET.
 HEAD_TIMEOUT = httpx.Timeout(connect=15.0, read=10.0, write=10.0, pool=10.0)
 
+# Hard cap on response body size. The HEAD probe rejects non-text content types,
+# but a hostile or misconfigured .onion can still lie about Content-Type/-Length
+# or omit both (chunked transfer) and stream gigabytes of body. r.text on a plain
+# client.get() has no size limit and will happily allocate all of it — on a 1GB
+# box that is a single-request OOM, faster than the 15s memory_watchdog tick can
+# react. Enforced by streaming and aborting mid-read once the cap is exceeded.
+MAX_BODY_BYTES = 5 * 1024 * 1024  # 5MB: generous for real HTML, far below OOM risk
+
 
 def _is_media_url(url: str) -> bool:
     """True if the URL path ends in a known binary/non-HTML extension."""
@@ -317,9 +336,38 @@ async def fetch(client: httpx.AsyncClient, url: str) -> Tuple[str | None, str]:
 
     for attempt in range(MAX_RETRIES):
         try:
-            r = await client.get(url, timeout=HTTP_TIMEOUT, follow_redirects=True)
-            r.raise_for_status()
-            return r.text, FETCH_OK
+            async with client.stream(
+                "GET", url, timeout=HTTP_TIMEOUT, follow_redirects=True
+            ) as r:
+                r.raise_for_status()
+                content_length = r.headers.get("content-length")
+                if content_length is not None:
+                    try:
+                        if int(content_length) > MAX_BODY_BYTES:
+                            logger.warning(
+                                "Oversized response (Content-Length=%s): %s",
+                                content_length, url,
+                            )
+                            return None, FETCH_SKIP
+                    except ValueError:
+                        pass  # malformed header; fall through to the streamed cap
+                chunks = []
+                size = 0
+                async for chunk in r.aiter_bytes():
+                    size += len(chunk)
+                    if size > MAX_BODY_BYTES:
+                        logger.warning(
+                            "Oversized response (>%dMB streamed, uncapped/absent "
+                            "Content-Length): %s", MAX_BODY_BYTES // (1024 * 1024), url,
+                        )
+                        return None, FETCH_SKIP
+                    chunks.append(chunk)
+                try:
+                    charset = r.encoding
+                except Exception:
+                    charset = None
+                html = b"".join(chunks).decode(charset or "utf-8", errors="replace")
+                return html, FETCH_OK
         except httpx.HTTPStatusError as e:
             status = e.response.status_code
             if status in TRANSIENT_STATUSES:

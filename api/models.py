@@ -425,6 +425,17 @@ def _migrate_005(conn: sqlite3.Connection) -> None:
         print(f"{'='*50}\n", flush=True)
 
 
+@_migration(6, "index on pages.indexed_at (admin dashboard/list ordering)")
+def _migrate_006(conn: sqlite3.Connection) -> None:
+    # admin_dashboard and admin_pages (api/main.py) both ORDER BY / filter on
+    # indexed_at with no supporting index — on a 400k+ row table that forces a
+    # full table scan + sort per request. Only idx_pages_last_seen existed
+    # (a different column); this closes the gap.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pages_indexed_at ON pages(indexed_at DESC)"
+    )
+
+
 def run_numbered_migrations(conn: sqlite3.Connection) -> None:
     """Apply any not-yet-applied numbered migrations, each in its own transaction.
 
