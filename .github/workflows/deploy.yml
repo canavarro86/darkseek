@@ -87,3 +87,17 @@ jobs:
             fi
 
             echo "Deploy OK"
+
+            # Non-fatal crawler liveness check. api/nginx passing above only
+            # proves search/read paths work — it says nothing about the
+            # crawler, which has no HTTP surface to health-check. Without this,
+            # a crawler stuck Exited/Restarting after deploy is invisible to
+            # CI and only shows up as a stale index days/weeks later (this is
+            # exactly how it went unnoticed for two weeks in prod). Warns
+            # loudly instead of failing the deploy: a dead crawler doesn't
+            # mean the deployed code is bad, so it shouldn't trigger a rollback.
+            if [ -z "$(docker compose ps --status=running -q crawler)" ]; then
+              echo "::warning::crawler container is not running after deploy — indexing has stopped. Check: docker compose logs crawler"
+            else
+              echo "crawler OK (running)"
+            fi

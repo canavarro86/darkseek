@@ -1,0 +1,9 @@
+[Unit]
+Description=DarkSeek stack watchdog (one-shot check, triggered by the .timer)
+After=docker.service
+
+[Service]
+Type=oneshot
+Environment=DARKSEEK_DIR=/opt/darkseek
+Environment=WATCHDOG_LOG=/var/log/darkseek_watchdog.log
+ExecStart=/opt/darkseek/scripts/host_watchdog.sh

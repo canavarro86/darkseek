@@ -122,11 +122,18 @@ services:
     networks:
       - darkseek
     # Continuous seed-week mode: keep the crawler running across restarts.
+    # NOTE: `restart:` (below) is what actually governs this under plain
+    # `docker compose up` — a `deploy.restart_policy` block (which used to sit
+    # here) is a Swarm-only construct; plain Compose silently ignores it. It
+    # gave false confidence that failures were capped at 3 attempts when in
+    # fact only this `restart: on-failure` (uncapped, Docker's built-in
+    # exponential backoff) was ever in effect. Left uncapped on purpose: this
+    # container has no external supervisor, so Docker's own retry is the only
+    # thing bringing it back after a memory_watchdog exit or an OOM kill.
+    # It only helps while the Docker daemon itself is running, though — see
+    # scripts/host_watchdog.sh + deploy/darkseek.service for the boot-time and
+    # daemon-down gap this doesn't cover.
     restart: on-failure
-    deploy:
-      restart_policy:
-        condition: on-failure
-        max_attempts: 3
     healthcheck:
       test: ["CMD-SHELL", "pgrep -f crawler.spider > /dev/null || exit 1"]
       interval: 60s
@@ -142,23 +149,26 @@ services:
   # Daily DB backup (FIX 7). Bind-mounts the SAME host DB path the api/crawler
   # use (read-only) so it backs up the live database, and writes snapshots to
   # /opt/darkseek_backups on the host. Replaces the previous host cron at 23:00.
+  #
+  # sqlite + the cron table are baked into the image at build time now (see
+  # Dockerfile.backup), not installed by the container's start command. The
+  # previous `command: apk add --no-cache sqlite && ...` ran that install on
+  # EVERY start; under mem_limit 20m the install itself (package index fetch +
+  # unpack) OOMs, `restart: always` brings the container straight back up, and
+  # apk runs again — an unbounded crash-restart loop that never reaches the
+  # `crond` line, so the daily backup silently never ran either.
   backup:
-    image: alpine
+    build:
+      context: .
+      dockerfile: Dockerfile.backup
     mem_limit: 20m
     volumes:
       - /opt/darkseek_db:/opt/darkseek_db:ro
       - /opt/darkseek_backups:/opt/darkseek_backups
-      - ./scripts:/scripts:ro
     environment:
       - DATABASE_PATH=/opt/darkseek_db/darkseek.db
       - BACKUP_DIR=/opt/darkseek_backups
       - BACKUP_KEEP=7
-    # Install sqlite (for the online .backup) + register a 03:00 UTC cron, then
-    # run crond in the foreground. The container TZ is UTC by default.
-    command: >
-      sh -c "apk add --no-cache sqlite >/dev/null &&
-             echo '0 3 * * * /scripts/backup.sh >> /var/log/backup.log 2>&1' > /etc/crontabs/root &&
-             crond -f -l 2"
     restart: always
     networks:
       - darkseek

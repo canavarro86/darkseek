@@ -1,0 +1,24 @@
+FROM alpine:latest
+
+# sqlite is baked into the image at build time, not installed at container
+# start. The previous setup ran `apk add --no-cache sqlite` in the compose
+# `command:` on every start — on a 20m mem_limit that install (package index
+# fetch + unpack) OOMs, the container restarts (restart: always), and apk runs
+# again: an infinite crash-restart loop burning CPU/IO for no forward progress,
+# and the daily cron job (installed by the same command, AFTER the apk step)
+# never gets registered because the container never survives long enough.
+RUN apk add --no-cache sqlite
+
+COPY scripts/backup.sh /scripts/backup.sh
+COPY scripts/maintenance.sh /scripts/maintenance.sh
+RUN chmod +x /scripts/backup.sh /scripts/maintenance.sh
+
+# Cron lines baked in at build time too (previously written to
+# /etc/crontabs/root by the runtime command — same problem as the apk install).
+# 03:00 UTC daily backup; 04:00 UTC Sunday-only FTS5 optimize + ANALYZE.
+RUN { \
+      echo '0 3 * * * /scripts/backup.sh >> /var/log/backup.log 2>&1'; \
+      echo '0 4 * * 0 /scripts/maintenance.sh >> /var/log/maintenance.log 2>&1'; \
+    } > /etc/crontabs/root
+
+CMD ["crond", "-f", "-l", "2"]
