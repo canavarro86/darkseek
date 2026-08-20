@@ -83,9 +83,11 @@ def search_pages(
     total is the full match count. `raw_terms` for highlighting is also attached
     to each result dict under the `terms` key (additive; existing keys intact).
 
-    safe_mode (default True) hides pages tagged 'illegal'/'nsfw'; 'unknown'
-    (the default tag) and all other tags always pass. safe_mode=False disables
-    the filter entirely.
+    content_tag='illegal' is NEVER shown here, regardless of safe_mode — that is
+    a hard safety gate, not a content preference, so no caller-supplied argument
+    can disable it. safe_mode (default True) additionally hides 'nsfw' pages as
+    an adult-content preference toggle; 'unknown' (the default tag) and all other
+    tags always pass. safe_mode=False only disables the nsfw part of the filter.
     """
     match, raw_terms = _build_match(query)
     if not match:
@@ -99,12 +101,13 @@ def search_pages(
     where_extra = ""
     if category:
         where_extra += " AND p.category = ?"
+    # Illegal content is a safety gate, not a preference — always excluded from
+    # every public search, independent of safe_mode. Literal predicate (no bound
+    # param) so count/fetch param lists stay aligned.
+    where_extra += " AND COALESCE(p.content_tag, 'unknown') != 'illegal'"
     if safe_mode:
-        # 'unknown' is the default and always passes; only illegal/nsfw are hidden.
-        # Literal predicate (no bound param) so count/fetch param lists stay aligned.
-        where_extra += (
-            " AND (p.content_tag NOT IN ('illegal','nsfw') OR p.content_tag = 'unknown')"
-        )
+        # nsfw is a content-preference filter the user may explicitly disable.
+        where_extra += " AND COALESCE(p.content_tag, 'unknown') != 'nsfw'"
 
     # Alive (FRESH + stale) and archived (is_alive=0) pages are all selected; the
     # composite re-rank below sorts every alive result ahead of any archived one.
