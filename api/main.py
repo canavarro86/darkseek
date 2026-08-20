@@ -70,6 +70,12 @@ if _cors_origins:
 
 CATEGORIES = {"forum", "market", "news", "wiki", "service", "other"}
 
+# Moderation tag an admin may set via PUT /api/admin/pages/<id>. 'illegal' is the
+# hard safety gate enforced unconditionally by every public read path (see
+# api/search.py:search_pages, and the content_tag checks in /api/lookup, /stats,
+# /metrics below); the rest are content classification only.
+CONTENT_TAGS = {"safe", "nsfw", "scam", "illegal", "unknown"}
+
 # --- Admin panel: auth secret + decorators + helpers ------------------------
 # Falls back to a per-process random secret if JWT_SECRET is unset; that logs
 # every admin out on restart but never ships a hard-coded key. Set JWT_SECRET in
@@ -338,9 +344,14 @@ def health():
 @app.get("/stats")
 def stats():
     with get_db() as conn:
-        total = conn.execute("SELECT COUNT(*) FROM pages WHERE is_alive = 1").fetchone()[0]
+        total = conn.execute(
+            "SELECT COUNT(*) FROM pages "
+            "WHERE is_alive = 1 AND COALESCE(content_tag, 'unknown') != 'illegal'"
+        ).fetchone()[0]
         by_category = conn.execute(
-            "SELECT category, COUNT(*) as cnt FROM pages WHERE is_alive = 1 GROUP BY category"
+            "SELECT category, COUNT(*) as cnt FROM pages "
+            "WHERE is_alive = 1 AND COALESCE(content_tag, 'unknown') != 'illegal' "
+            "GROUP BY category"
         ).fetchall()
     visitors = get_visitor_stats()  # {visitors_today, visitors_yesterday}
     return jsonify({
@@ -360,7 +371,10 @@ def metrics():
     """Operational metrics for monitoring the crawler and DB footprint."""
     crawl = get_crawl_stats()
     with get_db() as conn:
-        total = conn.execute("SELECT COUNT(*) FROM pages WHERE is_alive = 1").fetchone()[0]
+        total = conn.execute(
+            "SELECT COUNT(*) FROM pages "
+            "WHERE is_alive = 1 AND COALESCE(content_tag, 'unknown') != 'illegal'"
+        ).fetchone()[0]
     return jsonify({
         "last_run": crawl["last_run"],
         "pages_per_hour": crawl["pages_per_hour"],
@@ -616,7 +630,9 @@ if os.environ.get("DEBUG") == "1":
         """
         with get_db() as conn:
             rows = conn.execute(
-                "SELECT title, description FROM pages WHERE lang LIKE 'ru%' LIMIT 3"
+                "SELECT title, description FROM pages "
+                "WHERE lang LIKE 'ru%' AND COALESCE(content_tag, 'unknown') != 'illegal' "
+                "LIMIT 3"
             ).fetchall()
         return jsonify({"rows": [dict(r) for r in rows]})
 
@@ -674,10 +690,14 @@ def lookup():
     with get_db() as conn:
         row = conn.execute(
             "SELECT url, title, description, category, lang, last_seen, "
-            "is_alive, indexed_at FROM pages WHERE url = ?",
+            "is_alive, indexed_at FROM pages "
+            "WHERE url = ? AND COALESCE(content_tag, 'unknown') != 'illegal'",
             (url,),
         ).fetchone()
 
+    # A blocked row is reported as not-found, same as a URL that was never
+    # indexed — this endpoint must never confirm the existence of illegal
+    # content, even indirectly.
     if row is None:
         return jsonify({"found": False, "url": url})
 
@@ -1064,15 +1084,19 @@ def admin_page_get(page_id):
 def admin_page_update(page_id):
     ip = _client_ip()
     data = request.get_json(silent=True) or {}
-    allowed = ("title", "description", "category", "lang", "is_alive")
+    allowed = ("title", "description", "category", "lang", "is_alive", "content_tag")
     sets = []
     params = []
     for field in allowed:
         if field in data:
-            sets.append(f"{field} = ?")
             value = data[field]
             if field == "is_alive":
                 value = 1 if value in (1, True, "1", "true", "alive") else 0
+            elif field == "content_tag" and value not in CONTENT_TAGS:
+                return jsonify(
+                    {"error": f"content_tag must be one of {sorted(CONTENT_TAGS)}"}
+                ), 400
+            sets.append(f"{field} = ?")
             params.append(value)
     if not sets:
         return jsonify({"error": "no fields to update"}), 400

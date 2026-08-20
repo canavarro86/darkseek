@@ -29,14 +29,17 @@ inside Docker on a single 1GB VPS — lean by design, self-hostable by anyone.
 - Community voting with Proof-of-Work gate (no accounts, no IPs)
 - Abuse reporting (scam/offline/illegal/spam) with PoW gate
 - Safe mode toggle with one-time adult content warning
+- Illegal-content tag (`content_tag`) excluded from search, lookup, and stats —
+  enforced independently of the safe-mode toggle, so it can't be turned off
 - Onion score (1–5 rating derived from votes)
 - Content deduplication by `content_hash`
 - Search query analytics (no IP, no user data stored)
-- CSAM keyword blocklist (crawler + search)
+- CSAM keyword blocklist — enforced at crawl time (matching pages are never
+  indexed) and at query time (matching searches are refused)
 - Instant answers: QR, base64, hash, passphrase, calc, ip, shorten
 - Submit / bulk submit `.onion` URLs
 - Dead site handling with exponential back-off
-- Docker Compose, 1GB RAM VPS, ~670MB total memory footprint
+- Docker Compose, 1GB RAM VPS, ~662MB total memory footprint
 - MIT licensed, self-hostable
 
 ---
@@ -87,8 +90,9 @@ make crawl
 | `ANTHROPIC_API_KEY` | Claude API key for AI categorization | required |
 | `DATABASE_PATH` | Path to SQLite database | `/app/db/darkseek.db` |
 | `TOR_PROXY` | Tor SOCKS5 proxy address | `socks5h://tor:9050` |
-| `CRAWLER_DELAY` | Delay between requests (seconds) | `1.5` |
-| `CRAWLER_WORKERS` | Concurrent crawler workers | `5` |
+| `CRAWLER_DELAY` | Delay between requests (seconds) | `3` |
+| `CRAWLER_WORKERS` | Concurrent crawler workers | `2` |
+| `EMPTY_QUEUE_SLEEP` | Idle wait (seconds) when every DB refill tier is empty | `60` |
 | `CORS_ORIGINS` | Allowed CORS origins (comma-separated) | empty (same-origin only) |
 
 ---
@@ -109,6 +113,8 @@ make crawl
 | GET | `/api/shorten?url=<url>` | Shorten a URL via TinyURL |
 | GET | `/stats` | Index statistics |
 | GET | `/metrics` | Crawler operational metrics (internal-only) |
+| GET | `/openapi.json` | Machine-readable OpenAPI 3 spec |
+| GET | `/docs` | Swagger UI, rendered against `/openapi.json` |
 | GET | `/health` | Health check |
 
 All `/api/` endpoints are rate-limited by nginx (10 req/min per IP). `/metrics`
@@ -121,42 +127,65 @@ is restricted to the internal Docker network.
 ```
 darkseek/
 ├── api/
-│   ├── main.py          # Flask app — all API endpoints
-│   ├── models.py        # SQLite connection, migrations, analytics
-│   ├── search.py        # FTS5 search logic, BM25 ranking
-│   ├── scoring.py       # Onion score calculation
-│   ├── stemmer.py       # Russian PyStemmer integration
-│   ├── synonyms.py      # Search synonym expansion
-│   └── search_parser.py # FTS5 query parser / sanitizer
+│   ├── main.py           # Flask app — all API endpoints
+│   ├── models.py         # SQLite connection, migrations, analytics
+│   ├── search.py         # FTS5 search logic, BM25 ranking
+│   ├── scoring.py        # Onion score calculation
+│   ├── stemmer.py        # Russian PyStemmer integration
+│   ├── synonyms.py       # Search synonym expansion
+│   ├── search_parser.py  # FTS5 query parser / sanitizer
+│   └── openapi.py        # OpenAPI 3 spec + Swagger UI for /docs
+├── config/
+│   └── blocked.py        # Shared CSAM keyword blocklist (crawler + search)
 ├── crawler/
-│   ├── spider.py        # Async httpx crawler over Tor SOCKS5
-│   ├── parser.py        # BeautifulSoup HTML parser
-│   ├── ai_describe.py   # Claude Haiku categorization
-│   ├── models.py        # Crawler DB layer
-│   └── dead_cache.py    # Dead onion negative cache
+│   ├── spider.py         # Async httpx crawler over Tor SOCKS5
+│   ├── parser.py         # BeautifulSoup HTML parser
+│   ├── ai_describe.py    # Claude Haiku categorization
+│   ├── models.py         # Crawler DB layer
+│   └── dead_cache.py     # Dead onion negative cache
 ├── db/
-│   └── schema.sql       # SQLite schema with FTS5 and triggers
+│   ├── schema.sql        # SQLite schema with FTS5 and triggers
+│   └── migrations/
+│       └── 002_crawl_queue.sql # Legacy one-off migration (superseded by
+│                                # the numbered migrations in api/models.py)
 ├── frontend/
-│   ├── index.html       # Main search page
-│   ├── submit.html      # Submit .onion URLs
-│   ├── about.html       # About page
-│   ├── privacy.html     # Privacy policy
-│   ├── donate.html      # Donation page
-│   └── faq.html         # FAQ / instant commands reference
+│   ├── index.html        # Main search page
+│   ├── submit.html       # Submit .onion URLs
+│   ├── about.html        # About page
+│   ├── privacy.html      # Privacy policy
+│   ├── terms.html        # Terms of service
+│   ├── disclaimer.html   # Legal disclaimer
+│   ├── donate.html       # Donation page
+│   ├── faq.html          # FAQ / instant commands reference
+│   └── style.css         # Shared stylesheet
 ├── scripts/
-│   ├── purge_illegal.py # One-time CSAM content purge
-│   ├── dedupe.py        # Collapse duplicate content_hash rows
-│   ├── normalize_lang.py# Canonicalize language tags
-│   └── reprocess_ai.py  # Re-enrich heuristic rows with AI
+│   ├── backup.sh          # DB snapshot (run by the backup container)
+│   ├── maintenance.sh     # Weekly FTS5 optimize + ANALYZE
+│   ├── host_watchdog.sh   # Host-level compose-stack watchdog (see deploy/)
+│   ├── purge_illegal.py   # Retroactive CSAM content purge
+│   ├── dedupe.py          # Collapse duplicate content_hash rows
+│   ├── normalize_lang.py  # Canonicalize language tags
+│   ├── reprocess_ai.py    # Re-enrich heuristic rows with AI
+│   └── migrate_v2.py      # One-off v2 schema migration helper
+├── deploy/
+│   ├── darkseek.service           # systemd unit: boot-time `docker compose up -d`
+│   ├── darkseek-watchdog.service  # systemd unit: runs host_watchdog.sh
+│   ├── darkseek-watchdog.timer    # systemd timer: every 10 minutes
+│   └── README.md                  # Install instructions for the units above
 ├── tor/
-│   └── torrc            # Tor daemon config + hidden service
+│   └── torrc              # Tor daemon config + hidden service
 ├── docker-compose.yml
 ├── nginx.conf
+├── Dockerfile.api
+├── Dockerfile.crawler
+├── Dockerfile.backup
+├── requirements.api.txt
+├── requirements.crawler.txt
 ├── Makefile
 ├── .env.example
 └── .github/
     └── workflows/
-        └── deploy.yml   # CI/CD: auto-deploy on merge to main
+        └── deploy.yml     # CI/CD: auto-deploy on merge to main
 ```
 
 ---
@@ -184,12 +213,13 @@ Type directly in the search box:
 ## Memory Footprint
 
 ```
-tor      180 MB
-api      180 MB
-nginx     32 MB
-crawler  280 MB (runs continuously)
+tor       180 MB
+api       180 MB
+crawler   250 MB (memory watchdog restarts the process at 200 MB RSS)
+nginx      32 MB
+backup     20 MB (nightly job, low duty cycle)
 ─────────────────
-Total   ~672 MB / 1024 MB
+Total    ~662 MB / 1024 MB
 ```
 
 Tested on a $5/mo Vultr VPS (1 vCPU, 1GB RAM, Amsterdam).
