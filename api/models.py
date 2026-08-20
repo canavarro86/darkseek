@@ -465,10 +465,28 @@ def run_numbered_migrations(conn: sqlite3.Connection) -> None:
             if version in applied:
                 continue
             try:
-                conn.execute("BEGIN")
+                # BEGIN IMMEDIATE takes the write lock up front instead of at the
+                # first write, so a concurrent process (another gunicorn worker,
+                # or the crawler container, which also imports api.models and
+                # runs init_db() at import time) blocks here rather than racing;
+                # the re-check right after re-reads schema_migrations under that
+                # lock, so a loser that wakes up after the winner committed sees
+                # the version already recorded and skips instead of crashing on
+                # a duplicate INSERT. Apply the same pattern to future migrations.
+                conn.execute("BEGIN IMMEDIATE")
+                already = conn.execute(
+                    "SELECT 1 FROM schema_migrations WHERE version = ?", (version,)
+                ).fetchone()
+                if already:
+                    conn.execute("ROLLBACK")
+                    logger.info(
+                        "migration %d already applied by another process; skipping",
+                        version,
+                    )
+                    continue
                 fn(conn)
                 conn.execute(
-                    "INSERT INTO schema_migrations (version, description) VALUES (?, ?)",
+                    "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
                     (version, description),
                 )
                 conn.execute("COMMIT")
