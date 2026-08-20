@@ -476,6 +476,7 @@ async def _process_url(
         "page_type": parsed.get("page_type", "other"),
         "enrichment_method": meta.get("enrichment_method", "heuristic"),
         "content_tag": meta.get("content_tag", "unknown"),
+        "content_tag_src": meta.get("content_tag_src"),
     }
 
     async with flush_lock:

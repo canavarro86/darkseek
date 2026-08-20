@@ -66,6 +66,14 @@ SYSTEM_PROMPT = (
 VALID_CONTENT_TAGS = {"safe", "nsfw", "scam", "unknown"}
 DEFAULT_CONTENT_TAG = "unknown"
 
+# content_tag_src values, mirroring enrichment_method's ai/heuristic vocabulary
+# but scoped to just the safety tag: which mechanism produced the CURRENT
+# content_tag on a row. NULL/None means the row predates this feature and has
+# never been looked at by either classifier. Reuses the same 'ai'/'heuristic'
+# string constants as enrichment_method since the vocabulary is identical.
+CONTENT_TAG_SRC_AI = METHOD_AI
+CONTENT_TAG_SRC_HEURISTIC = METHOD_HEURISTIC
+
 
 # --- Language normalization (single source of truth) ------------------------
 # Used by both enrichers AND scripts/normalize_lang.py so the rule lives in
@@ -141,6 +149,40 @@ def heuristic_category(url: str, title: str) -> str:
         if any(kw in haystack for kw in keywords):
             return category
     return "other"
+
+
+# --- Heuristic content_tag (single source of truth, no local LLM) -----------
+# Deliberately narrower than the AI classifier: a keyword miss is left as
+# 'unknown' rather than guessed as 'safe', so a bad heuristic never asserts a
+# safety judgement it has no positive signal for. These lists target general
+# fraud/adult-content wording only — they do NOT duplicate or weaken the hard
+# pre-storage CSAM blocklist in config/blocked.py (pages matching that never
+# reach this code at all). scam is checked before nsfw: fraud protection is
+# the higher-value signal when both could plausibly match.
+_SCAM_KEYWORDS = (
+    "scam", "ripper", "rip off", "ripped off", "exit scam", "ponzi",
+    "scam list", "scammer", "no escrow", "fake vendor", "phishing",
+)
+_NSFW_KEYWORDS = (
+    "porn", "xxx", "hentai", "fetish", "camgirl", "cam girls", "escort",
+    "onlyfans", "erotic", "nude", "adult video", "sex tape", "brothel",
+)
+
+
+def heuristic_content_tag(url: str, title: str, description: str) -> str:
+    """Classify content safety from URL + title + description keywords.
+
+    Returns 'scam' or 'nsfw' on a keyword hit, else 'unknown' — never 'safe',
+    since absence of a bad keyword is not positive evidence of safety. Never
+    returns 'illegal': that tag is reserved for community reports / manual ops,
+    same constraint the AI classifier is held to (see VALID_CONTENT_TAGS).
+    """
+    haystack = f"{url} {title} {description}".lower()
+    if any(kw in haystack for kw in _SCAM_KEYWORDS):
+        return "scam"
+    if any(kw in haystack for kw in _NSFW_KEYWORDS):
+        return "nsfw"
+    return DEFAULT_CONTENT_TAG
 
 
 def _detect_lang(text: str) -> str:
@@ -432,21 +474,25 @@ class HeuristicEnricher:
 
         category = heuristic_category(url, title)
         lang = _detect_lang(body)
+        content_tag = heuristic_content_tag(url, title, description)
 
         cat_src = "keyword" if category != "other" else "default"
         lang_src = "langdetect" if lang != LANG_OTHER else "none"
+        tag_src = "keyword" if content_tag != DEFAULT_CONTENT_TAG else "default"
         logger.info(
-            "enrich method=heuristic category_src=%s lang_src=%s url=%s",
-            cat_src, lang_src, url,
+            "enrich method=heuristic category_src=%s lang_src=%s content_tag_src=%s url=%s",
+            cat_src, lang_src, tag_src, url,
         )
         return {
             "title": title,
             "description": description,
             "category": category,
-            # The heuristic path does no safety classification; leave it unknown
-            # so safe-mode never hides a page on a guess. The AI path sets a real
-            # tag; community reports can escalate it later.
-            "content_tag": DEFAULT_CONTENT_TAG,
+            # Lower-confidence than an AI verdict: a keyword miss stays
+            # 'unknown' rather than being guessed as 'safe'. content_tag_src
+            # marks this row for later AI re-classification (see
+            # scripts/reprocess_ai.py tier 5) once credits/circuit recover.
+            "content_tag": content_tag,
+            "content_tag_src": CONTENT_TAG_SRC_HEURISTIC,
             "lang": lang,
             "enrichment_method": METHOD_HEURISTIC,
         }
@@ -494,8 +540,9 @@ class AIEnricher:
         if result is None:
             return base  # failure already recorded against the breaker
         result["enrichment_method"] = METHOD_AI
+        result["content_tag_src"] = CONTENT_TAG_SRC_AI
         logger.info(
-            "enrich method=ai category_src=ai lang_src=ai url=%s", url
+            "enrich method=ai category_src=ai lang_src=ai content_tag_src=ai url=%s", url
         )
         return result
 
@@ -528,6 +575,9 @@ def describe(html: str, url: str) -> dict:
                 "description": "",
                 "category": "other",
                 "content_tag": DEFAULT_CONTENT_TAG,
+                # No classifier actually ran here (parser itself failed) — leave
+                # src unset rather than falsely claiming a heuristic looked.
+                "content_tag_src": None,
                 "lang": LANG_OTHER,
                 "enrichment_method": METHOD_HEURISTIC,
             }
@@ -556,4 +606,5 @@ def classify_text(text: str, url: str) -> dict | None:
     if result is None:
         return result
     result["enrichment_method"] = METHOD_AI
+    result["content_tag_src"] = CONTENT_TAG_SRC_AI
     return result
