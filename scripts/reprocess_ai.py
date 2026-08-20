@@ -35,6 +35,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from api.models import get_db  # noqa: E402
 from crawler.ai_describe import (  # noqa: E402
+    CONTENT_TAG_SRC_AI,
+    CONTENT_TAG_SRC_HEURISTIC,
+    DEFAULT_CONTENT_TAG,
     INPUT_CHARS,
     LANG_OTHER,
     MAX_TOKENS,
@@ -46,6 +49,7 @@ from crawler.ai_describe import (  # noqa: E402
     _get_client,
     _parse_response,
     heuristic_category,
+    heuristic_content_tag,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -70,8 +74,15 @@ EST_OUTPUT_TOKENS = 100
 EST_COST_PER_PAGE = EST_INPUT_TOKENS * INPUT_PRICE + EST_OUTPUT_TOKENS * OUTPUT_PRICE
 
 # --- Tier predicates --------------------------------------------------------
-# The four tiers partition every pending row exactly once (NULL-safe), so a row
-# is processed by precisely one tier and tiers run in this priority order.
+# Tiers 1-4 partition every legacy 'pending' row exactly once (NULL-safe), so a
+# row is processed by precisely one of them and they run in this priority
+# order. Tier 5 is a separate, independent population: rows that already have
+# real title/description/category (enrichment_method may be 'ai' or
+# 'heuristic') but whose content_tag was only ever a keyword guess
+# (content_tag_src = 'heuristic') — it re-runs those through the API so a
+# heuristic safety guess gets upgraded to a real AI verdict once credits/the
+# circuit recover. See crawler/ai_describe.py HeuristicEnricher for how rows
+# get content_tag_src='heuristic' in the first place.
 _FM = "category IN ('forum','market')"
 _NOT_FM = "(category IS NULL OR category NOT IN ('forum','market'))"
 _ENRU = "lang IN ('en','ru')"
@@ -82,6 +93,7 @@ TIERS = {
     2: ("forum/market other lang", f"{_FM} AND {_NOT_ENRU}"),
     3: ("other category + en/ru", f"{_NOT_FM} AND {_ENRU}"),
     4: ("remaining pending", f"{_NOT_FM} AND {_NOT_ENRU}"),
+    5: ("heuristic content_tag backfill", None),
 }
 
 # A row is a candidate only if it is still pending AND has something to enrich.
@@ -90,8 +102,17 @@ BASE_FILTER = (
     "AND NOT (title IS NULL AND description IS NULL)"
 )
 
+# Tier 5 filter: independent of enrichment_method — only cares whether the
+# content_tag currently on the row is a heuristic guess.
+CONTENT_TAG_TIER_FILTER = (
+    "content_tag_src = 'heuristic' "
+    "AND NOT (title IS NULL AND description IS NULL)"
+)
+
 
 def _tier_where(tier: int) -> str:
+    if tier == 5:
+        return CONTENT_TAG_TIER_FILTER
     return f"{BASE_FILTER} AND ({TIERS[tier][1]})"
 
 
@@ -118,6 +139,7 @@ def _heuristic_from_row(url, title, description) -> dict:
         "title": (title or text[:60] or (url or "")[:60])[:60],
         "description": (description or text[:160])[:160],
         "category": heuristic_category(url or "", title),
+        "content_tag": heuristic_content_tag(url or "", title, description),
         "lang": _detect_lang(text),
     }
 
@@ -161,6 +183,7 @@ def _call_api_with_cost(client, text: str, url: str) -> tuple[dict | None, float
         "title": text[:60],
         "description": text[:160],
         "category": "other",
+        "content_tag": DEFAULT_CONTENT_TAG,
         "lang": LANG_OTHER,
     }
     backoff = 2.0
@@ -212,12 +235,12 @@ def _call_api_with_cost(client, text: str, url: str) -> tuple[dict | None, float
 # --- Dry run ----------------------------------------------------------------
 def dry_run(budget: float, tiers: list[int]) -> None:
     with get_db() as conn:
-        counts = {t: _count(conn, t) for t in (1, 2, 3, 4)}
+        counts = {t: _count(conn, t) for t in (1, 2, 3, 4, 5)}
 
     selected_total = 0
     selected_cost = 0.0
     print()
-    for t in (1, 2, 3, 4):
+    for t in (1, 2, 3, 4, 5):
         label = f"Tier {t} ({TIERS[t][0]}):"
         n = counts[t]
         cost = n * EST_COST_PER_PAGE
@@ -264,20 +287,25 @@ def reprocess(budget: float, tiers: list[int]) -> None:
         for tier in tiers:
             if stop:
                 break
+            last_id = 0
             while True:
-                # Re-select each iteration: committed rows have left 'pending'
-                # so they are never reselected — this is what makes the job
-                # resumable and loop-free.
+                # Re-select each iteration: for tiers 1-4 committed rows have
+                # left 'pending' so they are naturally never reselected. Tier 5
+                # has no such guarantee — a row whose AI call fails STAYS
+                # content_tag_src='heuristic' (that's still the honest state),
+                # so the id > last_id cursor is what guarantees forward
+                # progress there instead of looping on the same failures.
                 with get_db() as conn:
                     rows = conn.execute(
                         f"SELECT id, url, title, description FROM pages "
-                        f"WHERE {_tier_where(tier)} LIMIT ?",
-                        (BATCH_SIZE,),
+                        f"WHERE {_tier_where(tier)} AND id > ? ORDER BY id LIMIT ?",
+                        (last_id, BATCH_SIZE),
                     ).fetchall()
                 if not rows:
                     break  # tier drained
+                last_id = max(row["id"] for row in rows)
 
-                updates = []  # (id, title, description, category, lang, method)
+                updates = []  # (id, title, description, category, lang, method, content_tag, content_tag_src)
                 for row in rows:
                     # One-call lookahead: never START a call that could cross 90%.
                     if spent + EST_COST_PER_PAGE > stop_threshold:
@@ -310,6 +338,8 @@ def reprocess(budget: float, tiers: list[int]) -> None:
                         updates.append((
                             row["id"], record["title"], record["description"],
                             record["category"], record["lang"], METHOD_AI,
+                            record.get("content_tag", DEFAULT_CONTENT_TAG),
+                            CONTENT_TAG_SRC_AI,
                         ))
                         upgraded += 1
                     else:
@@ -318,6 +348,7 @@ def reprocess(budget: float, tiers: list[int]) -> None:
                         updates.append((
                             row["id"], h["title"], h["description"],
                             h["category"], h["lang"], METHOD_HEURISTIC,
+                            h["content_tag"], CONTENT_TAG_SRC_HEURISTIC,
                         ))
                         skipped += 1
                     processed += 1
@@ -328,9 +359,13 @@ def reprocess(budget: float, tiers: list[int]) -> None:
                     with get_db() as conn:
                         conn.executemany(
                             "UPDATE pages SET title = ?, description = ?, "
-                            "category = ?, lang = ?, enrichment_method = ? "
+                            "category = ?, lang = ?, enrichment_method = ?, "
+                            "content_tag = ?, content_tag_src = ? "
                             "WHERE id = ?",
-                            [(t_, d_, c_, l_, m_, i_) for (i_, t_, d_, c_, l_, m_) in updates],
+                            [
+                                (t_, d_, c_, l_, m_, ct_, cts_, i_)
+                                for (i_, t_, d_, c_, l_, m_, ct_, cts_) in updates
+                            ],
                         )
                         conn.commit()
 
@@ -353,7 +388,7 @@ def reprocess(budget: float, tiers: list[int]) -> None:
 
 def _print_summary(spent, budget, upgraded, skipped, processed, stop_reason) -> None:
     with get_db() as conn:
-        remaining = {t: _count(conn, t) for t in (1, 2, 3, 4)}
+        remaining = {t: _count(conn, t) for t in (1, 2, 3, 4, 5)}
     pct = (spent / budget * 100) if budget else 0.0
     print()
     print("=" * 60)
@@ -363,7 +398,7 @@ def _print_summary(spent, budget, upgraded, skipped, processed, stop_reason) -> 
     print(f"  Downgraded heur: {skipped}")
     print(f"  Total spent    : ${spent:.4f} / ${budget:.2f} ({pct:.0f}%)")
     print("  Rows remaining (pending) by tier:")
-    for t in (1, 2, 3, 4):
+    for t in (1, 2, 3, 4, 5):
         print(f"    Tier {t} ({TIERS[t][0]}): {remaining[t]}")
     print("=" * 60)
 
@@ -372,7 +407,7 @@ def _parse_args(argv):
     p = argparse.ArgumentParser(description="Selective, budget-capped AI backfill.")
     p.add_argument("--budget", type=float, default=DEFAULT_BUDGET_USD,
                    help=f"Hard USD spend cap (default {DEFAULT_BUDGET_USD:.2f}).")
-    p.add_argument("--tier", type=int, choices=(1, 2, 3, 4), default=None,
+    p.add_argument("--tier", type=int, choices=(1, 2, 3, 4, 5), default=None,
                    help="Process only this priority tier (default: all tiers 1-4).")
     p.add_argument("--dry-run", action="store_true",
                    help="Show per-tier counts and cost estimate; make no API calls.")
@@ -384,7 +419,7 @@ def main(argv=None) -> None:
     if args.budget <= 0:
         logger.error("--budget must be positive")
         sys.exit(2)
-    tiers = [args.tier] if args.tier else [1, 2, 3, 4]
+    tiers = [args.tier] if args.tier else [1, 2, 3, 4, 5]
     if args.dry_run:
         dry_run(args.budget, tiers)
     else:

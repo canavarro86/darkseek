@@ -74,6 +74,7 @@ def upsert_page(
     page_type: str = "other",
     enrichment_method: str = "heuristic",
     content_tag: str = "unknown",
+    content_tag_src: str | None = None,
 ) -> None:
     with get_db() as conn:
         # Dedup invariant: the same content_hash must exist under exactly one URL.
@@ -103,8 +104,8 @@ def upsert_page(
         try:
             conn.execute(
                 """
-                INSERT INTO pages (url, title, description, category, lang, score, is_alive, is_active, last_seen, last_scanned_at, content_hash, page_type, enrichment_method, content_tag)
-                VALUES (?, ?, ?, ?, ?, ?, 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?, ?)
+                INSERT INTO pages (url, title, description, category, lang, score, is_alive, is_active, last_seen, last_scanned_at, content_hash, page_type, enrichment_method, content_tag, content_tag_src)
+                VALUES (?, ?, ?, ?, ?, ?, 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?)
                 ON CONFLICT(url) DO UPDATE SET
                     title             = excluded.title,
                     description       = excluded.description,
@@ -119,6 +120,7 @@ def upsert_page(
                     page_type         = excluded.page_type,
                     enrichment_method = excluded.enrichment_method,
                     content_tag       = excluded.content_tag,
+                    content_tag_src   = excluded.content_tag_src,
                     last_seen    = CASE
                         WHEN excluded.content_hash IS NOT NULL
                              AND excluded.content_hash != COALESCE(pages.content_hash, '')
@@ -126,7 +128,7 @@ def upsert_page(
                         ELSE pages.last_seen
                         END
                 """,
-                (url, title, description, category, lang, score, content_hash, page_type, enrichment_method, content_tag),
+                (url, title, description, category, lang, score, content_hash, page_type, enrichment_method, content_tag, content_tag_src),
             )
             conn.commit()
         except sqlite3.IntegrityError:
@@ -509,8 +511,9 @@ def _write_success(conn: sqlite3.Connection, rec: dict) -> None:
         """
         INSERT INTO pages (url, title, description, category, lang, score,
             is_alive, is_active, last_seen, last_scanned_at, content_hash,
-            page_type, enrichment_method, content_tag, crawl_attempts, next_crawl_at)
-        VALUES (?, ?, ?, ?, ?, ?, 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?, ?, 0, datetime('now', ?))
+            page_type, enrichment_method, content_tag, content_tag_src,
+            crawl_attempts, next_crawl_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, 0, datetime('now', ?))
         ON CONFLICT(url) DO UPDATE SET
             title             = excluded.title,
             description       = excluded.description,
@@ -527,13 +530,15 @@ def _write_success(conn: sqlite3.Connection, rec: dict) -> None:
             content_hash      = excluded.content_hash,
             page_type         = excluded.page_type,
             enrichment_method = excluded.enrichment_method,
-            content_tag       = excluded.content_tag
+            content_tag       = excluded.content_tag,
+            content_tag_src   = excluded.content_tag_src
         """,
         (
             url, rec.get("title"), rec.get("description"), rec.get("category"),
             rec.get("lang"), rec.get("score", 0.0), content_hash,
             rec.get("page_type", "other"), rec.get("enrichment_method", "heuristic"),
-            rec.get("content_tag", "unknown"), f"+{days} days",
+            rec.get("content_tag", "unknown"), rec.get("content_tag_src"),
+            f"+{days} days",
         ),
     )
 

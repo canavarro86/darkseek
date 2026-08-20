@@ -436,6 +436,18 @@ def _migrate_006(conn: sqlite3.Connection) -> None:
     )
 
 
+@_migration(7, "content_tag_src column + index (heuristic vs ai provenance)")
+def _migrate_007(conn: sqlite3.Connection) -> None:
+    # Distinguishes a low-confidence keyword-guessed content_tag from a real AI
+    # verdict, so scripts/reprocess_ai.py can find and upgrade the former once
+    # the AI circuit is closed again. NULL on legacy rows nothing has touched.
+    if not _column_exists(conn, "pages", "content_tag_src"):
+        conn.execute("ALTER TABLE pages ADD COLUMN content_tag_src TEXT DEFAULT NULL")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pages_content_tag_src ON pages(content_tag_src)"
+    )
+
+
 def run_numbered_migrations(conn: sqlite3.Connection) -> None:
     """Apply any not-yet-applied numbered migrations, each in its own transaction.
 
